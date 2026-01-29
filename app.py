@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 # HARUS DIPANGGIL DI BARIS PALING AWAL
 # ==============================================
 st.set_page_config(
-    page_title="Excel Part Search Tool",
+    page_title="Part Number Finder",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -460,7 +460,7 @@ class ExcelSearchApp:
     
     def display_dashboard(self):
         """Menampilkan dashboard utama"""
-        st.markdown('<h1 class="main-header">🔍 Excel Part Search Tool</h1>', unsafe_allow_html=True)
+        st.markdown('<h1 class="main-header">🔍 Part Number Finder</h1>', unsafe_allow_html=True)
         
         # Sidebar - Status dan Info
         with st.sidebar:
@@ -524,6 +524,7 @@ class ExcelSearchApp:
                 )
                 
                 if st.button("🔍 Cari Part Number", type="primary", use_container_width=True):
+                    
                     if search_number:
                         with st.spinner("Mencari..."):
                             results = self.search_part_number(search_number)
