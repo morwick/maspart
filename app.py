@@ -21,15 +21,87 @@ import base64
 import warnings
 warnings.filterwarnings('ignore')
 
-# Konfigurasi halaman Streamlit
+# ==============================================
+# KONFIGURASI AWAL UNTUK HIDE MENU
+# HARUS DIPANGGIL DI BARIS PALING AWAL
+# ==============================================
 st.set_page_config(
     page_title="Excel Part Search Tool",
     page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': None,        # Hapus menu "Get Help"
+        'Report a bug': None,    # Hapus menu "Report a bug"
+        'About': None            # Hapus menu "About"
+    }
 )
 
-# CSS Custom untuk styling
+# ==============================================
+# CSS UNTUK HIDE SEMUA LOGO DI SUDUT KANAN ATAS
+# ==============================================
+hide_menu_style = """
+<style>
+    /* Hide hamburger menu (tiga garis) */
+    #MainMenu {visibility: hidden;}
+    
+    /* Hide footer */
+    footer {visibility: hidden;}
+    
+    /* Hide deploy button (logo bintang) */
+    .stDeployButton {display: none !important;}
+    
+    /* Hide GitHub corner logo */
+    .viewerBadge_link__qRIco {
+        display: none !important;
+    }
+    
+    /* Hide container for badges */
+    .viewerBadge_container__r5tak {
+        display: none !important;
+    }
+    
+    /* Hide "Made with Streamlit" */
+    .viewerBadge_container__r5tak {
+        display: none !important;
+    }
+    
+    /* Hide the three dots menu completely */
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    
+    /* Hide app header */
+    header[data-testid="stHeader"] {
+        display: none !important;
+    }
+    
+    /* Hide all buttons in header */
+    div[data-testid="stToolbar"] {
+        display: none !important;
+    }
+    
+    /* Hide any remaining elements in top right corner */
+    div[data-testid="stToolbar"] > div {
+        display: none !important;
+    }
+    
+    /* Hide edit app button */
+    [title="Edit this app"] {
+        display: none !important;
+    }
+    
+    /* Hide any iframe from Streamlit sharing */
+    iframe {
+        display: none !important;
+    }
+</style>
+"""
+
+# Terapkan CSS
+st.markdown(hide_menu_style, unsafe_allow_html=True)
+
+# CSS Custom untuk styling aplikasi
 st.markdown("""
 <style>
     .main-header {
@@ -37,6 +109,7 @@ st.markdown("""
         color: #1E88E5;
         text-align: center;
         margin-bottom: 2rem;
+        padding-top: 1rem;
     }
     .sub-header {
         font-size: 1.5rem;
