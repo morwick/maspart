@@ -433,9 +433,9 @@ class ExcelSearchApp:
                 """)
         
         # Main content area
-        col1, col2 = st.columns([3, 1])
+        col2 = st.columns(1)[0]
         
-        with col1:
+        with col2:
             # Box pencarian
             st.markdown('<div class="search-box">', unsafe_allow_html=True)
             st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
@@ -478,20 +478,6 @@ class ExcelSearchApp:
                         st.warning("Masukkan nama part untuk mencari")
             
             st.markdown('</div>', unsafe_allow_html=True)
-        
-        with col2:
-            # Info singkat
-            st.markdown("### 💡 Tips")
-            st.info("""
-            - **Auto-load**: File Excel di folder `data/` akan otomatis terindeks
-            - **1 hasil/file**: Setiap file hanya menampilkan 1 hasil pertama
-            - **Case-insensitive**: Pencarian tidak memperhatikan huruf besar/kecil
-            """)
-            
-            # Export options
-            if 'search_results' in st.session_state and st.session_state.search_results:
-                st.markdown("### 📤 Export")
-                self.display_export_options()
         
         # Tampilkan hasil pencarian
         self.display_search_results()
