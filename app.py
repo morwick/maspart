@@ -117,9 +117,10 @@ class ExcelSearchApp:
     def __init__(self):
         """Inisialisasi aplikasi dan setup session state"""
         self.data_folder = Path("data")
-        self.stock_file = Path("stock_db.xlsx")
+        self.stock_folder = Path("data/stok")
         self.cache_folder = Path(".cache")
         self.cache_folder.mkdir(exist_ok=True)
+        self.stock_folder.mkdir(parents=True, exist_ok=True)
         
         # Inisialisasi session state
         if 'excel_files' not in st.session_state:
@@ -349,38 +350,96 @@ class ExcelSearchApp:
     
     def load_stock_database(self):
         """
-        OPTIMIZED: Load stock database dengan chunk reading
+        OPTIMIZED: Load stock database dari folder data/stok/
+        Membaca semua file Excel di folder stok
+        Kolom A = Part Number, Kolom D = Stock
         """
-        if self.stock_file.exists():
-            try:
-                with st.spinner("📊 Memuat database stok..."):
-                    # Baca hanya kolom yang diperlukan
-                    df = pd.read_excel(
-                        self.stock_file,
-                        usecols=[0, 32],  # Kolom A dan AG
-                        dtype=str
-                    )
-                    
-                    st.session_state.stock_database = {}
-                    
-                    for _, row in df.iterrows():
-                        if len(row) > 0 and pd.notna(row.iloc[0]):
-                            part_number = str(row.iloc[0]).strip().upper()
-                            stock_value = str(row.iloc[1]).strip() if len(row) > 1 and pd.notna(row.iloc[1]) else "0"
+        if not self.stock_folder.exists():
+            st.sidebar.info("ℹ️ Folder 'data/stok/' tidak ditemukan. Fitur stock tidak aktif.")
+            return
+        
+        try:
+            with st.spinner("📊 Memuat database stok..."):
+                # Reset stock database
+                st.session_state.stock_database = {}
+                
+                # Cari semua file Excel di folder stok
+                excel_extensions = ['.xlsx', '.xls', '.xlsm']
+                stock_files = []
+                
+                for file in self.stock_folder.iterdir():
+                    if file.is_file() and any(file.name.lower().endswith(ext) for ext in excel_extensions):
+                        stock_files.append(file)
+                
+                if not stock_files:
+                    st.sidebar.warning("⚠️ Tidak ada file Excel di folder 'data/stok/'")
+                    return
+                
+                total_parts_loaded = 0
+                
+                # Process setiap file stok
+                for stock_file in stock_files:
+                    try:
+                        # Baca hanya kolom A dan D (index 0 dan 3)
+                        df = pd.read_excel(
+                            stock_file,
+                            usecols=[0, 3],  # Kolom A dan D
+                            dtype=str,
+                            engine='openpyxl'
+                        )
+                        
+                        if df.empty:
+                            continue
+                        
+                        # Rename columns untuk kemudahan
+                        df.columns = ['part_number', 'stock']
+                        
+                        # Clean dan normalize data
+                        df['part_number'] = df['part_number'].fillna('').str.strip().str.upper()
+                        df['stock'] = df['stock'].fillna('0').str.strip()
+                        
+                        # Remove empty part numbers
+                        df = df[df['part_number'] != '']
+                        
+                        # Build dictionary - jika ada duplicate, yang terakhir menang
+                        for _, row in df.iterrows():
+                            part_num = row['part_number']
+                            stock_val = row['stock']
                             
-                            if part_number:
-                                st.session_state.stock_database[part_number] = stock_value
-                                
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Tidak dapat memuat database stok: {str(e)}")
+                            if part_num:
+                                st.session_state.stock_database[part_num] = stock_val
+                                total_parts_loaded += 1
+                        
+                    except Exception as e:
+                        st.sidebar.warning(f"⚠️ Error membaca {stock_file.name}: {str(e)}")
+                        continue
+                
+                if total_parts_loaded > 0:
+                    st.sidebar.success(f"✅ {total_parts_loaded} part numbers loaded dari {len(stock_files)} file stok")
+                else:
+                    st.sidebar.warning("⚠️ Tidak ada data stok yang berhasil dimuat")
+                    
+        except Exception as e:
+            st.sidebar.error(f"❌ Error loading stock database: {str(e)}")
     
     def get_stock_from_database(self, part_number):
-        """Get stock value dengan optimized lookup"""
+        """
+        Get stock value dengan exact match lookup
+        Kolom A (Part Number) → Kolom D (Stock)
+        """
         if not st.session_state.stock_database:
             return "0"
         
+        if not part_number or part_number == "N/A":
+            return "0"
+        
+        # Normalize untuk matching
         search_key = part_number.strip().upper()
-        return st.session_state.stock_database.get(search_key, "0")
+        
+        # Exact match
+        stock_value = st.session_state.stock_database.get(search_key, "0")
+        
+        return stock_value
     
     def search_part_number(self, search_term):
         """
@@ -524,10 +583,17 @@ class ExcelSearchApp:
             st.markdown("---")
             st.markdown("### 📁 Struktur Folder")
             st.info(f"""
-            Aplikasi akan secara otomatis membaca semua file Excel dari:
+            **Data Excel:**
             ```
             {self.data_folder.absolute()}
             ```
+            
+            **Database Stok:**
+            ```
+            {self.stock_folder.absolute()}
+            ```
+            
+            Format stok: Kolom A = Part Number, Kolom D = Stock
             """)
             
             with st.expander("📖 Panduan Cepat"):
@@ -536,12 +602,15 @@ class ExcelSearchApp:
                 2. **Format file**: .xlsx, .xls, .xlsm
                 3. **Pencarian Part Number**: Mencari di kolom B
                 4. **Pencarian Part Name**: Mencari di kolom D
-                5. **Database Stok**: Letakkan `stock_db.xlsx` di root folder
+                5. **Database Stok**: Letakkan file Excel di folder `data/stok/`
+                   - Kolom A: Part Number
+                   - Kolom D: Stock
                 
                 **Optimasi:**
                 - ✅ Parallel file processing
                 - ✅ Smart caching
                 - ✅ Index-based search
+                - ✅ Multi-file stock support
                 """)
         
         # Main content
