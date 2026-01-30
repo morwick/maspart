@@ -407,6 +407,11 @@ class ExcelSearchApp:
                             part_num_full = row['part_number']
                             stock_val = row['stock']
                             
+                            # Skip header rows (yang mengandung kata "kode", "barang", "total", dll)
+                            skip_keywords = ['kode', 'barang', 'total', 'nama', 'gudang', 'part', 'number', 'stock', 'qty']
+                            if any(keyword in part_num_full.lower() for keyword in skip_keywords):
+                                continue
+                            
                             if part_num_full:
                                 # Extract part number setelah titik (.)
                                 # Format: 000001.WG9160580508 → WG9160580508
@@ -414,6 +419,10 @@ class ExcelSearchApp:
                                     part_num_clean = part_num_full.split('.')[-1].strip().upper()
                                 else:
                                     part_num_clean = part_num_full.strip().upper()
+                                
+                                # Skip jika part number kosong setelah cleaning
+                                if not part_num_clean:
+                                    continue
                                 
                                 # Simpan dengan key yang clean
                                 st.session_state.stock_database[part_num_clean] = stock_val
