@@ -353,6 +353,7 @@ class ExcelSearchApp:
         OPTIMIZED: Load stock database dari folder data/stok/
         Membaca semua file Excel di folder stok
         Kolom A = Part Number, Kolom D = Stock
+        Format: 000001.WG9160580508 → Extract WG9160580508
         """
         if not self.stock_folder.exists():
             st.sidebar.info("ℹ️ Folder 'data/stok/' tidak ditemukan. Fitur stock tidak aktif.")
@@ -395,19 +396,27 @@ class ExcelSearchApp:
                         df.columns = ['part_number', 'stock']
                         
                         # Clean dan normalize data
-                        df['part_number'] = df['part_number'].fillna('').str.strip().str.upper()
+                        df['part_number'] = df['part_number'].fillna('').str.strip()
                         df['stock'] = df['stock'].fillna('0').str.strip()
                         
                         # Remove empty part numbers
                         df = df[df['part_number'] != '']
                         
-                        # Build dictionary - jika ada duplicate, yang terakhir menang
+                        # Build dictionary dengan extract part setelah titik
                         for _, row in df.iterrows():
-                            part_num = row['part_number']
+                            part_num_full = row['part_number']
                             stock_val = row['stock']
                             
-                            if part_num:
-                                st.session_state.stock_database[part_num] = stock_val
+                            if part_num_full:
+                                # Extract part number setelah titik (.)
+                                # Format: 000001.WG9160580508 → WG9160580508
+                                if '.' in part_num_full:
+                                    part_num_clean = part_num_full.split('.')[-1].strip().upper()
+                                else:
+                                    part_num_clean = part_num_full.strip().upper()
+                                
+                                # Simpan dengan key yang clean
+                                st.session_state.stock_database[part_num_clean] = stock_val
                                 total_parts_loaded += 1
                         
                     except Exception as e:
@@ -438,6 +447,11 @@ class ExcelSearchApp:
         
         # Exact match
         stock_value = st.session_state.stock_database.get(search_key, "0")
+        
+        # Debug info (uncomment untuk troubleshooting)
+        # if stock_value == "0":
+        #     st.sidebar.write(f"🔍 Not found: {search_key}")
+        #     st.sidebar.write(f"Available keys sample: {list(st.session_state.stock_database.keys())[:5]}")
         
         return stock_value
     
@@ -558,6 +572,9 @@ class ExcelSearchApp:
         with st.sidebar:
             st.markdown("### 📊 Status Sistem")
             
+            # Debug mode toggle
+            debug_mode = st.checkbox("🐛 Debug Mode", value=False, help="Tampilkan info debugging untuk troubleshooting stock")
+            
             if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
                 # Clear cache
                 for cache_file in self.cache_folder.glob("*.pkl"):
@@ -579,6 +596,15 @@ class ExcelSearchApp:
             
             if st.session_state.stock_database:
                 st.metric("Part di Database Stok", len(st.session_state.stock_database))
+                
+                # Debug info
+                if debug_mode and st.session_state.stock_database:
+                    with st.expander("🔍 Debug: Sample Stock Data"):
+                        sample_keys = list(st.session_state.stock_database.keys())[:10]
+                        for key in sample_keys:
+                            st.text(f"{key} → {st.session_state.stock_database[key]}")
+                        if len(st.session_state.stock_database) > 10:
+                            st.text(f"... dan {len(st.session_state.stock_database) - 10} lainnya")
             
             st.markdown("---")
             st.markdown("### 📁 Struktur Folder")
