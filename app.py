@@ -49,8 +49,8 @@ hide_menu_style = """
     .viewerBadge_container__r5tak {display: none !important;}
     [data-testid="collapsedControl"] {display: none !important;}
     header[data-testid="stHeader"] {display: none !important;}
-    div[data-testid="stToolbar"] {display: none !important;}
-    div[data-testid="stToolbar"] > div {display: none !important;}
+  /*  div[data-testid="stToolbar"] {display: none !important;}
+    div[data-testid="stToolbar"] > div {display: none !important;} */
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
 </style>
@@ -756,3 +756,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
