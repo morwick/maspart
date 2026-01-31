@@ -50,7 +50,7 @@ hide_menu_style = """
     [data-testid="collapsedControl"] {display: none !important;}
     header[data-testid="stHeader"] {display: none !important;}
     div[data-testid="stToolbar"] {display: none !important;}
-    div[data-testid="stToolbar"] > div {display: none !important;} 
+    div[data-testid="stToolbar"] > div {display: none !important;}
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
 </style>
@@ -117,15 +117,12 @@ class ExcelSearchApp:
     def __init__(self):
         """Inisialisasi aplikasi dan setup session state"""
         self.data_folder = Path("data")
-        self.stock_folder = Path("data/stok")
         self.cache_folder = Path(".cache")
         self.cache_folder.mkdir(exist_ok=True)
-        self.stock_folder.mkdir(parents=True, exist_ok=True)
         
         # Inisialisasi session state
         if 'excel_files' not in st.session_state:
             st.session_state.excel_files = []
-            st.session_state.stock_database = {}
             st.session_state.index_data = []
             st.session_state.last_index_time = None
             st.session_state.search_results = []
@@ -332,9 +329,6 @@ class ExcelSearchApp:
                     st.session_state.last_file_count = current_file_count
                     st.session_state.last_index_time = datetime.now()
                     
-                    # Load stock database
-                    self.load_stock_database()
-                    
                     progress_bar.empty()
                     progress_text.empty()
                     
@@ -348,121 +342,6 @@ class ExcelSearchApp:
             return name_without_ext.split(' - ')[-1]
         return name_without_ext
     
-    def load_stock_database(self):
-        """
-        OPTIMIZED: Load stock database dari folder data/stok/
-        Membaca semua file Excel di folder stok
-        Kolom A = Part Number, Kolom D = Stock
-        Format: 000001.WG9160580508 → Extract WG9160580508
-        """
-        if not self.stock_folder.exists():
-            st.sidebar.info("ℹ️ Folder 'data/stok/' tidak ditemukan. Fitur stock tidak aktif.")
-            return
-        
-        try:
-            with st.spinner("📊 Memuat database stok..."):
-                # Reset stock database
-                st.session_state.stock_database = {}
-                
-                # Cari semua file Excel di folder stok
-                excel_extensions = ['.xlsx', '.xls', '.xlsm']
-                stock_files = []
-                
-                for file in self.stock_folder.iterdir():
-                    if file.is_file() and any(file.name.lower().endswith(ext) for ext in excel_extensions):
-                        stock_files.append(file)
-                
-                if not stock_files:
-                    st.sidebar.warning("⚠️ Tidak ada file Excel di folder 'data/stok/'")
-                    return
-                
-                total_parts_loaded = 0
-                
-                # Process setiap file stok
-                for stock_file in stock_files:
-                    try:
-                        # Baca hanya kolom A dan D (index 0 dan 3)
-                        df = pd.read_excel(
-                            stock_file,
-                            usecols=[0, 3],  # Kolom A dan D
-                            dtype=str,
-                            engine='openpyxl'
-                        )
-                        
-                        if df.empty:
-                            continue
-                        
-                        # Rename columns untuk kemudahan
-                        df.columns = ['part_number', 'stock']
-                        
-                        # Clean dan normalize data
-                        df['part_number'] = df['part_number'].fillna('').str.strip()
-                        df['stock'] = df['stock'].fillna('0').str.strip()
-                        
-                        # Remove empty part numbers
-                        df = df[df['part_number'] != '']
-                        
-                        # Build dictionary dengan extract part setelah titik
-                        for _, row in df.iterrows():
-                            part_num_full = row['part_number']
-                            stock_val = row['stock']
-                            
-                            # Skip header rows (yang mengandung kata "kode", "barang", "total", dll)
-                            skip_keywords = ['kode', 'barang', 'total', 'nama', 'gudang', 'part', 'number', 'stock', 'qty']
-                            if any(keyword in part_num_full.lower() for keyword in skip_keywords):
-                                continue
-                            
-                            if part_num_full:
-                                # Extract part number setelah titik (.)
-                                # Format: 000001.WG9160580508 → WG9160580508
-                                if '.' in part_num_full:
-                                    part_num_clean = part_num_full.split('.')[-1].strip().upper()
-                                else:
-                                    part_num_clean = part_num_full.strip().upper()
-                                
-                                # Skip jika part number kosong setelah cleaning
-                                if not part_num_clean:
-                                    continue
-                                
-                                # Simpan dengan key yang clean
-                                st.session_state.stock_database[part_num_clean] = stock_val
-                                total_parts_loaded += 1
-                        
-                    except Exception as e:
-                        st.sidebar.warning(f"⚠️ Error membaca {stock_file.name}: {str(e)}")
-                        continue
-                
-                if total_parts_loaded > 0:
-                    st.sidebar.success(f"✅ {total_parts_loaded} part numbers loaded dari {len(stock_files)} file stok")
-                else:
-                    st.sidebar.warning("⚠️ Tidak ada data stok yang berhasil dimuat")
-                    
-        except Exception as e:
-            st.sidebar.error(f"❌ Error loading stock database: {str(e)}")
-    
-    def get_stock_from_database(self, part_number):
-        """
-        Get stock value dengan exact match lookup
-        Kolom A (Part Number) → Kolom D (Stock)
-        """
-        if not st.session_state.stock_database:
-            return "0"
-        
-        if not part_number or part_number == "N/A":
-            return "0"
-        
-        # Normalize untuk matching
-        search_key = part_number.strip().upper()
-        
-        # Exact match
-        stock_value = st.session_state.stock_database.get(search_key, "0")
-        
-        # Debug info (uncomment untuk troubleshooting)
-        # if stock_value == "0":
-        #     st.sidebar.write(f"🔍 Not found: {search_key}")
-        #     st.sidebar.write(f"Available keys sample: {list(st.session_state.stock_database.keys())[:5]}")
-        
-        return stock_value
     
     def search_part_number(self, search_term):
         """
@@ -496,7 +375,6 @@ class ExcelSearchApp:
                     part_num = str(row['part_number']) if pd.notna(row['part_number']) else "N/A"
                     part_name = str(row['part_name']) if pd.notna(row['part_name']) else "N/A"
                     qty = str(row['quantity']) if pd.notna(row['quantity']) else "N/A"
-                    stock = self.get_stock_from_database(part_num)
                     
                     results.append({
                         'File': simple_name,
@@ -505,7 +383,6 @@ class ExcelSearchApp:
                         'Part Number': part_num,
                         'Part Name': part_name,
                         'Quantity': qty,
-                        'Stock': stock,
                         'Excel Row': idx + 2,
                         'Full Path': file_info['full_path']
                     })
@@ -553,7 +430,6 @@ class ExcelSearchApp:
                 part_num = str(row['part_number']) if pd.notna(row['part_number']) else "N/A"
                 part_name = str(row['part_name']) if pd.notna(row['part_name']) else "N/A"
                 qty = str(row['quantity']) if pd.notna(row['quantity']) else "N/A"
-                stock = self.get_stock_from_database(part_num)
                 
                 # Verify match
                 if search_term_upper in part_name.upper():
@@ -564,7 +440,6 @@ class ExcelSearchApp:
                         'Part Number': part_num,
                         'Part Name': part_name,
                         'Quantity': qty,
-                        'Stock': stock,
                         'Excel Row': idx + 2,
                         'Full Path': file_info['full_path']
                     })
@@ -580,9 +455,6 @@ class ExcelSearchApp:
         # Sidebar
         with st.sidebar:
             st.markdown("### 📊 Status Sistem")
-            
-            # Debug mode toggle
-            debug_mode = st.checkbox("🐛 Debug Mode", value=False, help="Tampilkan info debugging untuk troubleshooting stock")
             
             if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
                 # Clear cache
@@ -603,32 +475,13 @@ class ExcelSearchApp:
             st.markdown("### 📈 Statistik")
             st.metric("File Excel", st.session_state.loaded_files_count)
             
-            if st.session_state.stock_database:
-                st.metric("Part di Database Stok", len(st.session_state.stock_database))
-                
-                # Debug info
-                if debug_mode and st.session_state.stock_database:
-                    with st.expander("🔍 Debug: Sample Stock Data"):
-                        sample_keys = list(st.session_state.stock_database.keys())[:10]
-                        for key in sample_keys:
-                            st.text(f"{key} → {st.session_state.stock_database[key]}")
-                        if len(st.session_state.stock_database) > 10:
-                            st.text(f"... dan {len(st.session_state.stock_database) - 10} lainnya")
-            
             st.markdown("---")
             st.markdown("### 📁 Struktur Folder")
             st.info(f"""
-            **Data Excel:**
+            Aplikasi akan secara otomatis membaca semua file Excel dari:
             ```
             {self.data_folder.absolute()}
             ```
-            
-            **Database Stok:**
-            ```
-            {self.stock_folder.absolute()}
-            ```
-            
-            Format stok: Kolom A = Part Number, Kolom D = Stock
             """)
             
             with st.expander("📖 Panduan Cepat"):
@@ -637,15 +490,11 @@ class ExcelSearchApp:
                 2. **Format file**: .xlsx, .xls, .xlsm
                 3. **Pencarian Part Number**: Mencari di kolom B
                 4. **Pencarian Part Name**: Mencari di kolom D
-                5. **Database Stok**: Letakkan file Excel di folder `data/stok/`
-                   - Kolom A: Part Number
-                   - Kolom D: Stock
                 
                 **Optimasi:**
                 - ✅ Parallel file processing
                 - ✅ Smart caching
                 - ✅ Index-based search
-                - ✅ Multi-file stock support
                 """)
         
         # Main content
@@ -713,7 +562,7 @@ class ExcelSearchApp:
             
             df_results = pd.DataFrame(results)
             
-            display_cols = ['File', 'Part Number', 'Part Name', 'Quantity', 'Stock', 'Sheet', 'Excel Row']
+            display_cols = ['File', 'Part Number', 'Part Name', 'Quantity', 'Sheet', 'Excel Row']
             available_cols = [col for col in display_cols if col in df_results.columns]
             
             if available_cols:
@@ -726,7 +575,6 @@ class ExcelSearchApp:
                         "Part Number": st.column_config.TextColumn(width="medium"),
                         "Part Name": st.column_config.TextColumn(width="large"),
                         "Quantity": st.column_config.NumberColumn(width="small"),
-                        "Stock": st.column_config.TextColumn(width="small"),
                         "Sheet": st.column_config.TextColumn(width="medium"),
                         "Excel Row": st.column_config.NumberColumn(width="small")
                     }
@@ -756,5 +604,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
