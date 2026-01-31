@@ -283,10 +283,8 @@ class ExcelSearchApp:
             
             if need_reindex:
                 with st.spinner("🔄 Mengindeks file Excel..."):
-                    # RESET SEMUA DATA
                     st.session_state.excel_files = []
                     st.session_state.index_data = []
-                    st.session_state.loaded_files_count = 0
                     
                     progress_bar = st.progress(0)
                     progress_text = st.empty()
@@ -458,35 +456,15 @@ class ExcelSearchApp:
         with st.sidebar:
             st.markdown("### 📊 Status Sistem")
             
-            col_btn1, col_btn2 = st.columns(2)
-            
-            with col_btn1:
-                if st.button("🔄 Refresh", type="secondary", use_container_width=True):
-                    # Clear cache
-                    for cache_file in self.cache_folder.glob("*.pkl"):
-                        try:
-                            cache_file.unlink()
-                        except:
-                            pass
-                    self.auto_load_excel_files()
-                    st.rerun()
-            
-            with col_btn2:
-                if st.button("🗑️ Reset", type="secondary", use_container_width=True):
-                    # Force reset semua session state
-                    st.session_state.excel_files = []
-                    st.session_state.index_data = []
-                    st.session_state.search_results = []
-                    st.session_state.loaded_files_count = 0
-                    st.session_state.last_file_count = 0
-                    st.session_state.last_index_time = None
-                    # Clear cache
-                    for cache_file in self.cache_folder.glob("*.pkl"):
-                        try:
-                            cache_file.unlink()
-                        except:
-                            pass
-                    st.rerun()
+            if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
+                # Clear cache
+                for cache_file in self.cache_folder.glob("*.pkl"):
+                    try:
+                        cache_file.unlink()
+                    except:
+                        pass
+                self.auto_load_excel_files()
+                st.rerun()
             
             if st.session_state.last_index_time:
                 st.markdown(f"**Terakhir di-index:**")
@@ -588,7 +566,6 @@ class ExcelSearchApp:
             available_cols = [col for col in display_cols if col in df_results.columns]
             
             if available_cols:
-                # Tampilkan dataframe
                 st.dataframe(
                     df_results[available_cols],
                     use_container_width=True,
@@ -601,22 +578,6 @@ class ExcelSearchApp:
                         "Sheet": st.column_config.TextColumn(width="medium"),
                         "Excel Row": st.column_config.NumberColumn(width="small")
                     }
-                )
-                
-                # Tambahkan copy-able text area
-                st.markdown("### 📋 Copy Data")
-                st.info("💡 **Tip**: Klik area di bawah dan tekan Ctrl+A untuk select all, lalu Ctrl+C untuk copy")
-                
-                # Format data untuk easy copy
-                copy_text = "File\tPart Number\tPart Name\tQuantity\tSheet\tExcel Row\n"
-                for _, row in df_results[available_cols].iterrows():
-                    copy_text += f"{row['File']}\t{row['Part Number']}\t{row['Part Name']}\t{row['Quantity']}\t{row['Sheet']}\t{row['Excel Row']}\n"
-                
-                st.text_area(
-                    "Hasil pencarian (Tab-separated - bisa paste ke Excel)",
-                    value=copy_text,
-                    height=200,
-                    key="copy_results"
                 )
             
             with st.expander("📁 Detail File yang Ditemukan"):
