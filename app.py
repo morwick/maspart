@@ -1,29 +1,26 @@
 """
-EXCEL PART SEARCH WEB APP dengan AUTO-LOADING (OPTIMIZED VERSION)
-=================================================================
-Aplikasi web untuk mencari part number dan nama part di database Excel.
-Optimasi:
-1. Parallel processing untuk membaca file
-2. Lazy loading untuk dataframe
-3. Index caching
-4. Optimasi pembacaan Excel
+EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM
+=============================================================
+Login berbasis file Excel di folder /login
+- Struktur Excel: Kolom A = No, Kolom B = Username, Kolom C = Password, Kolom D = Role
+- Role: 'admin' atau 'user'
+- Session-based login dengan auto-logout otomatis
 """
 
 import streamlit as st
 import pandas as pd
 import os
 from pathlib import Path
-import time
 from datetime import datetime
-import base64
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import pickle
+import hmac
 warnings.filterwarnings('ignore')
 
 # ==============================================
-# KONFIGURASI AWAL UNTUK HIDE MENU
+# KONFIGURASI AWAL
 # ==============================================
 st.set_page_config(
     page_title="Part Number Finder",
@@ -38,9 +35,9 @@ st.set_page_config(
 )
 
 # ==============================================
-# CSS UNTUK HIDE SEMUA LOGO DI SUDUT KANAN ATAS
+# CSS — hide menu + styling
 # ==============================================
-hide_menu_style = """
+st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -53,20 +50,14 @@ hide_menu_style = """
     div[data-testid="stToolbar"] > div {display: none !important;}
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
-</style>
-"""
 
-st.markdown(hide_menu_style, unsafe_allow_html=True)
-
-# CSS Custom untuk styling aplikasi
-st.markdown("""
-<style>
+    /* ── halaman utama ── */
     .main-header {
         font-size: 2.5rem;
         color: #1E88E5;
         text-align: center;
-        margin-bottom: 2rem;
-        padding-top: 1rem;
+        margin-bottom: 1.5rem;
+        padding-top: 0.8rem;
     }
     .sub-header {
         font-size: 1.5rem;
@@ -74,533 +65,588 @@ st.markdown("""
         margin-top: 1.5rem;
         margin-bottom: 1rem;
     }
-    .success-box {
-        background-color: #E8F5E9;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 5px solid #4CAF50;
-        margin: 1rem 0;
-    }
-    .info-box {
-        background-color: #E3F2FD;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 5px solid #2196F3;
-        margin: 1rem 0;
-    }
-    .warning-box {
-        background-color: #FFF3E0;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 5px solid #FF9800;
-        margin: 1rem 0;
-    }
-    .stDataFrame {
-        font-size: 0.9rem;
-    }
     .search-box {
         background-color: #F5F5F5;
         padding: 1.5rem;
         border-radius: 0.5rem;
         margin-bottom: 1.5rem;
     }
+    .user-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: #E3F2FD;
+        border: 1px solid #90CAF9;
+        border-radius: 20px;
+        padding: 0.3rem 0.85rem;
+        font-size: 0.85rem;
+        color: #1565C0;
+        font-weight: 600;
+    }
+    .role-admin { color: #E65100; font-weight: 700; }
+    .role-user  { color: #1565C0; font-weight: 600; }
+
+    /* ── hide sidebar on login ── */
+    .hide-sidebar [data-testid="stSidebar"] { display: none !important; }
+    .hide-sidebar [data-testid="collapsedControl"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
-class ExcelSearchApp:
+
+# ================================================
+# KONSTANTA
+# ================================================
+SESSION_TIMEOUT_MINUTES = 30
+LOGIN_FOLDER            = Path("login")
+DATA_FOLDER             = Path("data")
+CACHE_FOLDER            = Path(".cache")
+
+
+# ================================================
+# LOGIN MANAGER
+# ================================================
+class LoginManager:
     """
-    KELAS UTAMA APLIKASI PENCARIAN EXCEL (OPTIMIZED)
-    ------------------------------------------------
-    Mengelola seluruh logika pencarian dan indexing dengan optimasi kecepatan
+    Autentikasi berbasis Excel di folder /login.
+
+    Struktur file (misal users.xlsx):
+    ┌─────┬──────────┬──────────┬───────┐
+    │  A  │    B     │    C     │   D   │
+    ├─────┼──────────┼──────────┼───────┤
+    │  1  │ admin    │ admin123 │ admin │
+    │  2  │ john     │ pass456  │ user  │
+    └─────┴──────────┴──────────┴───────┘
     """
-    
+
     def __init__(self):
-        """Inisialisasi aplikasi dan setup session state"""
-        self.data_folder = Path("data")
-        self.cache_folder = Path(".cache")
+        LOGIN_FOLDER.mkdir(parents=True, exist_ok=True)
+        if "login_users_df" not in st.session_state:
+            st.session_state.login_users_df = self._load_users()
+
+    @staticmethod
+    def _load_users() -> pd.DataFrame:
+        excel_ext = (".xlsx", ".xls", ".xlsm")
+        all_rows  = []
+
+        for fpath in LOGIN_FOLDER.iterdir():
+            if fpath.suffix.lower() not in excel_ext:
+                continue
+            try:
+                xls = pd.ExcelFile(fpath, engine="openpyxl")
+                for sheet in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet_name=sheet, dtype=str, header=None)
+                    if len(df) == 0:
+                        continue
+
+                    # buang header kalau ada
+                    first = df.iloc[0].astype(str).str.strip().str.lower().tolist()
+                    if any(v in ("username", "user", "nama") for v in first):
+                        df = df.iloc[1:].reset_index(drop=True)
+
+                    # ambil kolom yang tepat
+                    if len(df.columns) >= 4:
+                        df = df.iloc[:, 1:4]
+                    elif len(df.columns) == 3:
+                        pass
+                    else:
+                        continue
+
+                    df.columns = ["username", "password", "role"]
+                    df = df.dropna(subset=["username", "password"])
+                    df["username"] = df["username"].str.strip().str.lower()
+                    df["password"] = df["password"].str.strip()
+                    df["role"]     = df["role"].str.strip().str.lower().fillna("user")
+                    all_rows.append(df)
+            except Exception:
+                continue
+
+        if all_rows:
+            return pd.concat(all_rows, ignore_index=True).drop_duplicates(subset=["username"])
+        return pd.DataFrame(columns=["username", "password", "role"])
+
+    def authenticate(self, username: str, password: str):
+        df = st.session_state.login_users_df
+        if df.empty:
+            return None
+        username = username.strip().lower()
+        row = df[df["username"] == username]
+        if row.empty:
+            return None
+        if hmac.compare_digest(password.strip(), row.iloc[0]["password"]):
+            return {
+                "username":   username,
+                "role":       row.iloc[0]["role"],
+                "login_time": datetime.now(),
+                "last_active": datetime.now(),
+            }
+        return None
+
+    @staticmethod
+    def init_session():
+        for k, v in {"is_logged_in": False, "current_user": None, "login_error": None}.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
+
+    @staticmethod
+    def is_authenticated() -> bool:
+        if not st.session_state.get("is_logged_in"):
+            return False
+        user = st.session_state.get("current_user")
+        if user is None:
+            return False
+        elapsed = (datetime.now() - user["last_active"]).total_seconds() / 60
+        if elapsed > SESSION_TIMEOUT_MINUTES:
+            LoginManager.logout()
+            st.session_state["login_error"] = "⏰ Sesi telah berakhir karena tidak aktif. Silakan login ulang."
+            return False
+        user["last_active"] = datetime.now()
+        return True
+
+    @staticmethod
+    def logout():
+        st.session_state["is_logged_in"] = False
+        st.session_state["current_user"] = None
+
+    @staticmethod
+    def get_current_user():
+        return st.session_state.get("current_user")
+
+    def reload_users(self):
+        st.session_state.login_users_df = self._load_users()
+
+
+# ================================================
+# HALAMAN LOGIN — simple, pakai kolom tengah
+# ================================================
+def render_login_page(login_mgr: LoginManager):
+    error_msg = st.session_state.get("login_error")
+
+    # sembunyikan sidebar via CSS wrapper
+    st.markdown("""
+        <style>
+            [data-testid="stSidebar"] { display: none !important; }
+            [data-testid="collapsedControl"] { display: none !important; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # center kolom
+    _, col, _ = st.columns([1, 2, 1])
+
+    with col:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+
+        # logo + judul
+        st.markdown("# 🔍 Part Number Finder", unsafe_allow_html=False)
+        st.markdown("Silakan login untuk melanjutkan.", unsafe_allow_html=False)
+        st.divider()
+
+        # error
+        if error_msg:
+            st.error(error_msg, icon="⚠️")
+            st.session_state["login_error"] = None
+
+        # form
+        with st.form(key="login_form", clear_on_submit=True):
+            username  = st.text_input("👤 Username", placeholder="Masukkan username")
+            password  = st.text_input("🔑 Password", type="password", placeholder="Masukkan password")
+            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+
+
+    # logika auth (di luar kolom)
+    if submitted:
+        if not username or not password:
+            st.session_state["login_error"] = "Username dan password tidak boleh kosong."
+            st.rerun()
+
+        user_info = login_mgr.authenticate(username, password)
+        if user_info:
+            st.session_state["is_logged_in"] = True
+            st.session_state["current_user"] = user_info
+            st.session_state["login_error"]  = None
+            st.rerun()
+        else:
+            st.session_state["login_error"] = "Username atau password salah. Periksa kembali."
+            st.rerun()
+
+
+# ================================================
+# APLIKASI PENCARIAN
+# ================================================
+class ExcelSearchApp:
+
+    def __init__(self):
+        self.data_folder  = DATA_FOLDER
+        self.cache_folder = CACHE_FOLDER
         self.cache_folder.mkdir(exist_ok=True)
-        
-        # Inisialisasi session state
-        if 'excel_files' not in st.session_state:
-            st.session_state.excel_files = []
-            st.session_state.index_data = []
-            st.session_state.last_index_time = None
-            st.session_state.search_results = []
-            st.session_state.loaded_files_count = 0
-            st.session_state.last_file_count = 0
-            st.session_state.file_hashes = {}
-            st.session_state.search_index = {'part_number': {}, 'part_name': {}}
-        
-        # Auto-load data saat startup
+
+        if "excel_files" not in st.session_state:
+            st.session_state.excel_files         = []
+            st.session_state.index_data          = []
+            st.session_state.last_index_time     = None
+            st.session_state.search_results      = []
+            st.session_state.loaded_files_count  = 0
+            st.session_state.last_file_count     = 0
+            st.session_state.file_hashes         = {}
+            st.session_state.search_index        = {"part_number": {}, "part_name": {}}
+
         if not st.session_state.excel_files:
             self.auto_load_excel_files()
-    
+
+    # ---------- helpers ----------
     def create_data_folder(self):
-        """Membuat folder data jika belum ada"""
         if not self.data_folder.exists():
             self.data_folder.mkdir(parents=True)
-            st.sidebar.success(f"📁 Folder 'data' dibuat di: {self.data_folder.absolute()}")
-    
+
     def get_file_hash(self, file_path):
-        """Generate hash untuk file untuk cache validation"""
         try:
-            file_stat = file_path.stat()
-            hash_str = f"{file_path}_{file_stat.st_size}_{file_stat.st_mtime}"
-            return hashlib.md5(hash_str.encode()).hexdigest()
-        except:
+            s = file_path.stat()
+            return hashlib.md5(f"{file_path}_{s.st_size}_{s.st_mtime}".encode()).hexdigest()
+        except Exception:
             return None
-    
+
     def load_file_cache(self, file_path, file_hash):
-        """Load cached file data jika tersedia"""
         cache_file = self.cache_folder / f"{file_hash}.pkl"
         if cache_file.exists():
             try:
-                with open(cache_file, 'rb') as f:
+                with open(cache_file, "rb") as f:
                     return pickle.load(f)
-            except:
+            except Exception:
                 return None
         return None
-    
+
     def save_file_cache(self, file_path, file_hash, data):
-        """Save file data to cache"""
-        cache_file = self.cache_folder / f"{file_hash}.pkl"
         try:
-            with open(cache_file, 'wb') as f:
+            with open(self.cache_folder / f"{file_hash}.pkl", "wb") as f:
                 pickle.dump(data, f)
-        except:
+        except Exception:
             pass
-    
+
+    @staticmethod
+    def extract_simple_filename(filename):
+        name = os.path.splitext(filename)[0]
+        return name.split(" - ")[-1] if " - " in name else name
+
+    # ---------- process file ----------
     def process_single_file(self, file_path, relative_path):
-        """
-        OPTIMIZED: Process single Excel file dengan caching
-        """
-        results = []
-        file_name = file_path.name
+        results     = []
+        file_name   = file_path.name
         simple_name = self.extract_simple_filename(file_name)
-        
-        # Check cache
-        file_hash = self.get_file_hash(file_path)
+        file_hash   = self.get_file_hash(file_path)
+
         if file_hash:
-            cached_data = self.load_file_cache(file_path, file_hash)
-            if cached_data:
-                return cached_data
-        
+            cached = self.load_file_cache(file_path, file_hash)
+            if cached:
+                return cached
+
         try:
-            # Baca Excel dengan optimasi
-            xls = pd.ExcelFile(file_path, engine='openpyxl')
-            
+            xls = pd.ExcelFile(file_path, engine="openpyxl")
             for sheet_name in xls.sheet_names:
                 try:
-                    # Baca hanya kolom yang diperlukan (B, D, E = index 1, 3, 4)
-                    df = pd.read_excel(
-                        xls, 
-                        sheet_name=sheet_name,
-                        usecols=[1, 3, 4],  # Hanya baca kolom B, D, E
-                        dtype=str  # Read as string untuk performa lebih baik
-                    )
-                    
-                    # Rename columns untuk konsistensi
-                    df.columns = ['part_number', 'part_name', 'quantity']
-                    
-                    # Build search index untuk file ini
-                    part_number_index = {}
-                    part_name_index = {}
-                    
+                    df = pd.read_excel(xls, sheet_name=sheet_name, usecols=[1, 3, 4], dtype=str)
+                    df.columns = ["part_number", "part_name", "quantity"]
+
+                    pn_idx, nm_idx = {}, {}
                     for idx, row in df.iterrows():
-                        part_num = str(row['part_number']).strip().upper() if pd.notna(row['part_number']) else ""
-                        part_name = str(row['part_name']).strip().upper() if pd.notna(row['part_name']) else ""
-                        
-                        if part_num:
-                            if part_num not in part_number_index:
-                                part_number_index[part_num] = []
-                            part_number_index[part_num].append(idx)
-                        
-                        if part_name:
-                            # Index per kata untuk part name
-                            for word in part_name.split():
-                                if len(word) > 2:  # Skip kata pendek
-                                    if word not in part_name_index:
-                                        part_name_index[word] = []
-                                    part_name_index[word].append(idx)
-                    
-                    file_info = {
-                        'full_path': str(file_path),
-                        'file_name': file_name,
-                        'relative_path': str(relative_path),
-                        'simple_name': simple_name,
-                        'sheet': sheet_name,
-                        'dataframe': df,
-                        'row_count': len(df),
-                        'col_count': len(df.columns),
-                        'part_number_index': part_number_index,
-                        'part_name_index': part_name_index,
-                        'last_modified': datetime.fromtimestamp(file_path.stat().st_mtime)
-                    }
-                    
-                    results.append(file_info)
-                    
-                except Exception as e:
+                        pn = str(row["part_number"]).strip().upper() if pd.notna(row["part_number"]) else ""
+                        nm = str(row["part_name"]).strip().upper()   if pd.notna(row["part_name"])   else ""
+                        if pn:
+                            pn_idx.setdefault(pn, []).append(idx)
+                        if nm:
+                            for word in nm.split():
+                                if len(word) > 2:
+                                    nm_idx.setdefault(word, []).append(idx)
+
+                    results.append({
+                        "full_path":         str(file_path),
+                        "file_name":         file_name,
+                        "relative_path":     str(relative_path),
+                        "simple_name":       simple_name,
+                        "sheet":             sheet_name,
+                        "dataframe":         df,
+                        "row_count":         len(df),
+                        "col_count":         len(df.columns),
+                        "part_number_index": pn_idx,
+                        "part_name_index":   nm_idx,
+                        "last_modified":     datetime.fromtimestamp(file_path.stat().st_mtime),
+                    })
+                except Exception:
                     continue
-        
-        except Exception as e:
+        except Exception:
             pass
-        
-        # Cache hasil
+
         if file_hash and results:
             self.save_file_cache(file_path, file_hash, results)
-        
         return results
-    
+
+    # ---------- auto-load ----------
     def auto_load_excel_files(self):
-        """
-        OPTIMIZED: AUTO-LOAD dengan parallel processing
-        """
         try:
             self.create_data_folder()
-            
-            # Cari semua file Excel
-            excel_extensions = ['.xlsx', '.xls', '.xlsm']
+            excel_ext = (".xlsx", ".xls", ".xlsm")
             all_files = []
-            
-            for root, dirs, files in os.walk(self.data_folder):
-                for file in files:
-                    if any(file.lower().endswith(ext) for ext in excel_extensions):
-                        full_path = Path(root) / file
-                        relative_path = full_path.relative_to(self.data_folder)
-                        all_files.append((full_path, relative_path))
-            
+            for root, _, files in os.walk(self.data_folder):
+                for f in files:
+                    if f.lower().endswith(excel_ext):
+                        fp = Path(root) / f
+                        all_files.append((fp, fp.relative_to(self.data_folder)))
+
             if not all_files:
                 st.session_state.last_file_count = 0
                 return
-            
-            current_file_count = len(all_files)
-            
-            # Check jika perlu re-index
+
             need_reindex = (
-                current_file_count != st.session_state.last_file_count or 
-                st.session_state.last_index_time is None
+                len(all_files) != st.session_state.last_file_count
+                or st.session_state.last_index_time is None
             )
-            
+
             if need_reindex:
-                with st.spinner("🔄 Mengindeks file Excel..."):
+                with st.spinner("🔄 Mengindeks file Excel…"):
                     st.session_state.excel_files = []
-                    st.session_state.index_data = []
-                    
-                    progress_bar = st.progress(0)
-                    progress_text = st.empty()
-                    
-                    # PARALLEL PROCESSING dengan ThreadPoolExecutor
-                    max_workers = min(4, len(all_files))  # Maksimal 4 thread
+                    st.session_state.index_data  = []
+                    prog = st.progress(0)
+                    txt  = st.empty()
                     completed = 0
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        # Submit semua tasks
-                        future_to_file = {
-                            executor.submit(self.process_single_file, fp, rp): (fp, rp) 
-                            for fp, rp in all_files
-                        }
-                        
-                        # Process hasil saat selesai
-                        for future in as_completed(future_to_file):
+
+                    with ThreadPoolExecutor(max_workers=min(4, len(all_files))) as ex:
+                        futures = {ex.submit(self.process_single_file, fp, rp): (fp, rp)
+                                   for fp, rp in all_files}
+                        for future in as_completed(futures):
                             completed += 1
-                            progress = completed / len(all_files)
-                            progress_bar.progress(progress)
-                            progress_text.text(f"Processing {completed}/{len(all_files)} files...")
-                            
+                            prog.progress(completed / len(all_files))
+                            txt.text(f"Processing {completed}/{len(all_files)} files…")
                             try:
-                                file_results = future.result()
-                                if file_results:
-                                    for file_info in file_results:
-                                        st.session_state.excel_files.append(file_info)
-                                        
-                                        # Simpan untuk summary
-                                        st.session_state.index_data.append({
-                                            'file': file_info['simple_name'],
-                                            'relative_path': file_info['relative_path'],
-                                            'sheet': file_info['sheet'],
-                                            'rows': file_info['row_count'],
-                                            'last_modified': file_info['last_modified']
-                                        })
-                            except Exception as e:
+                                for fi in (future.result() or []):
+                                    st.session_state.excel_files.append(fi)
+                                    st.session_state.index_data.append({
+                                        "file":          fi["simple_name"],
+                                        "relative_path": fi["relative_path"],
+                                        "sheet":         fi["sheet"],
+                                        "rows":          fi["row_count"],
+                                        "last_modified": fi["last_modified"],
+                                    })
+                            except Exception:
                                 continue
-                    
-                    # Update session state
+
                     st.session_state.loaded_files_count = len(st.session_state.excel_files)
-                    st.session_state.last_file_count = current_file_count
-                    st.session_state.last_index_time = datetime.now()
-                    
-                    progress_bar.empty()
-                    progress_text.empty()
-                    
+                    st.session_state.last_file_count    = len(all_files)
+                    st.session_state.last_index_time    = datetime.now()
+                    prog.empty()
+                    txt.empty()
         except Exception as e:
-            st.sidebar.error(f"Error dalam auto-load: {str(e)}")
-    
-    def extract_simple_filename(self, filename):
-        """Membersihkan nama file"""
-        name_without_ext = os.path.splitext(filename)[0]
-        if ' - ' in name_without_ext:
-            return name_without_ext.split(' - ')[-1]
-        return name_without_ext
-    
-    
-    def search_part_number(self, search_term):
-        """
-        OPTIMIZED: Search menggunakan pre-built index
-        """
-        results = []
-        processed_files = set()
-        search_term_upper = search_term.strip().upper()
-        
-        if not search_term_upper:
+            st.sidebar.error(f"Error auto-load: {e}")
+
+    # ---------- search ----------
+    def search_part_number(self, term):
+        results, seen = [], set()
+        term_up = term.strip().upper()
+        if not term_up:
             return results
-        
-        for file_info in st.session_state.excel_files:
-            simple_name = file_info['simple_name']
-            
-            if simple_name in processed_files:
+        for fi in st.session_state.excel_files:
+            sn = fi["simple_name"]
+            if sn in seen:
                 continue
-            
-            # Gunakan index untuk pencarian cepat
-            part_number_index = file_info.get('part_number_index', {})
-            df = file_info['dataframe']
-            
-            # Cari di index
-            found = False
-            for indexed_part, row_indices in part_number_index.items():
-                if search_term_upper in indexed_part:
-                    # Ambil row pertama yang match
-                    idx = row_indices[0]
-                    row = df.iloc[idx]
-                    
-                    part_num = str(row['part_number']) if pd.notna(row['part_number']) else "N/A"
-                    part_name = str(row['part_name']) if pd.notna(row['part_name']) else "N/A"
-                    qty = str(row['quantity']) if pd.notna(row['quantity']) else "N/A"
-                    
+            df = fi["dataframe"]
+            for indexed_pn, indices in fi.get("part_number_index", {}).items():
+                if term_up in indexed_pn:
+                    row = df.iloc[indices[0]]
                     results.append({
-                        'File': simple_name,
-                        'Path': file_info['relative_path'],
-                        'Sheet': file_info['sheet'],
-                        'Part Number': part_num,
-                        'Part Name': part_name,
-                        'Quantity': qty,
-                        'Excel Row': idx + 2,
-                        'Full Path': file_info['full_path']
+                        "File":        sn,
+                        "Path":        fi["relative_path"],
+                        "Sheet":       fi["sheet"],
+                        "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
+                        "Part Name":   str(row["part_name"])   if pd.notna(row["part_name"])   else "N/A",
+                        "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
+                        "Excel Row":   indices[0] + 2,
+                        "Full Path":   fi["full_path"],
                     })
-                    
-                    processed_files.add(simple_name)
-                    found = True
+                    seen.add(sn)
                     break
-            
-            if found:
-                continue
-        
         return results
-    
-    def search_part_name(self, search_term):
-        """
-        OPTIMIZED: Search part name menggunakan index
-        """
-        results = []
-        processed_files = set()
-        search_term_upper = search_term.strip().upper()
-        
-        if not search_term_upper:
+
+    def search_part_name(self, term):
+        results, seen = [], set()
+        term_up = term.strip().upper()
+        if not term_up:
             return results
-        
-        for file_info in st.session_state.excel_files:
-            simple_name = file_info['simple_name']
-            
-            if simple_name in processed_files:
+        for fi in st.session_state.excel_files:
+            sn = fi["simple_name"]
+            if sn in seen:
                 continue
-            
-            part_name_index = file_info.get('part_name_index', {})
-            df = file_info['dataframe']
-            
-            # Cari di index
-            found_indices = set()
-            for word in search_term_upper.split():
-                if word in part_name_index:
-                    found_indices.update(part_name_index[word])
-            
-            if found_indices:
-                # Ambil row pertama yang match
-                idx = min(found_indices)
-                row = df.iloc[idx]
-                
-                part_num = str(row['part_number']) if pd.notna(row['part_number']) else "N/A"
-                part_name = str(row['part_name']) if pd.notna(row['part_name']) else "N/A"
-                qty = str(row['quantity']) if pd.notna(row['quantity']) else "N/A"
-                
-                # Verify match
-                if search_term_upper in part_name.upper():
+            pni = fi.get("part_name_index", {})
+            found_idx = set()
+            for w in term_up.split():
+                if w in pni:
+                    found_idx.update(pni[w])
+            if found_idx:
+                idx   = min(found_idx)
+                row   = fi["dataframe"].iloc[idx]
+                pname = str(row["part_name"]) if pd.notna(row["part_name"]) else "N/A"
+                if term_up in pname.upper():
                     results.append({
-                        'File': simple_name,
-                        'Path': file_info['relative_path'],
-                        'Sheet': file_info['sheet'],
-                        'Part Number': part_num,
-                        'Part Name': part_name,
-                        'Quantity': qty,
-                        'Excel Row': idx + 2,
-                        'Full Path': file_info['full_path']
+                        "File":        sn,
+                        "Path":        fi["relative_path"],
+                        "Sheet":       fi["sheet"],
+                        "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
+                        "Part Name":   pname,
+                        "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
+                        "Excel Row":   idx + 2,
+                        "Full Path":   fi["full_path"],
                     })
-                    
-                    processed_files.add(simple_name)
-        
+                    seen.add(sn)
         return results
-    
+
+    # ---------- UI ----------
     def display_dashboard(self):
-        """Menampilkan dashboard utama"""
+        user = LoginManager.get_current_user()
+        role = user["role"] if user else "user"
+
         st.markdown('<h1 class="main-header">🔍 Part Number Finder</h1>', unsafe_allow_html=True)
-        
-        # Sidebar
+
+        # ---- SIDEBAR ----
         with st.sidebar:
+            badge_cls = "role-admin" if role == "admin" else "role-user"
+            st.markdown(
+                f'<div class="user-badge">👤 {user["username"].title()}'
+                f' — <span class="{badge_cls}">{role.upper()}</span></div>',
+                unsafe_allow_html=True
+            )
+            st.caption(f"Login pukul {user['login_time'].strftime('%H:%M')} · Timeout {SESSION_TIMEOUT_MINUTES} min")
+
+            if st.button("🚪 Logout", type="secondary", use_container_width=True):
+                LoginManager.logout()
+                for k in ("excel_files", "index_data", "search_results",
+                          "last_index_time", "loaded_files_count", "last_file_count"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+            st.divider()
+
+            # admin panel
+            if role == "admin":
+                st.markdown("### 🛡️ Admin Panel")
+                if st.button("👥 Reload Users", type="secondary", use_container_width=True):
+                    st.session_state.login_users_df = LoginManager._load_users()
+                    st.toast("✅ Data user telah di-reload!")
+
+                df_users = st.session_state.get("login_users_df", pd.DataFrame())
+                if not df_users.empty:
+                    with st.expander("📋 Daftar User"):
+                        st.dataframe(
+                            df_users[["username", "role"]].rename(columns={"username": "Username", "role": "Role"}),
+                            hide_index=True, use_container_width=True
+                        )
+                st.divider()
+
+            # status
             st.markdown("### 📊 Status Sistem")
-            
             if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
-                # Clear cache
-                for cache_file in self.cache_folder.glob("*.pkl"):
+                for cf in CACHE_FOLDER.glob("*.pkl"):
                     try:
-                        cache_file.unlink()
-                    except:
+                        cf.unlink()
+                    except Exception:
                         pass
+                for k in ("excel_files", "last_index_time", "last_file_count"):
+                    st.session_state.pop(k, None)
                 self.auto_load_excel_files()
                 st.rerun()
-            
-            if st.session_state.last_index_time:
-                st.markdown(f"**Terakhir di-index:**")
-                st.markdown(f"`{st.session_state.last_index_time.strftime('%Y-%m-%d %H:%M:%S')}`")
-            
-            st.markdown("---")
-            
+
+            if st.session_state.get("last_index_time"):
+                st.markdown(f"**Terakhir di-index:**\n`{st.session_state.last_index_time.strftime('%Y-%m-%d %H:%M:%S')}`")
+
+            st.divider()
             st.markdown("### 📈 Statistik")
-            st.metric("File Excel", st.session_state.loaded_files_count)
-            
-            st.markdown("---")
+            st.metric("File Excel", st.session_state.get("loaded_files_count", 0))
+
+            st.divider()
             st.markdown("### 📁 Struktur Folder")
-            st.info(f"""
-            Aplikasi akan secara otomatis membaca semua file Excel dari:
-            ```
-            {self.data_folder.absolute()}
-            ```
-            """)
-            
+            st.info(f"File Excel dibaca dari:\n```\n{self.data_folder.absolute()}\n```")
+
             with st.expander("📖 Panduan Cepat"):
                 st.markdown("""
-                1. **Letakkan file Excel** di folder `data/`
-                2. **Format file**: .xlsx, .xls, .xlsm
-                3. **Pencarian Part Number**: Mencari di kolom B
-                4. **Pencarian Part Name**: Mencari di kolom D
-                
-                **Optimasi:**
+                1. Letakkan file Excel di folder `data/`
+                2. Format: .xlsx, .xls, .xlsm
+                3. **Part Number** → kolom B
+                4. **Part Name** → kolom D
+
+                **Optimasi aktif:**
                 - ✅ Parallel file processing
                 - ✅ Smart caching
                 - ✅ Index-based search
                 """)
-        
-        # Main content
-        col2 = st.columns(1)[0]
-        
-        with col2:
-            st.markdown('<div class="search-box">', unsafe_allow_html=True)
-            st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
-            
-            tab1, tab2 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name"])
-            
-            with tab1:
-                with st.form(key="search_part_number_form", clear_on_submit=False):
-                    search_number = st.text_input(
-                        "Masukkan Part Number:",
-                        placeholder="Contoh: ABC-123, XYZ789",
-                        key="search_part_number_input"
-                    )
-                    
-                    submit_button = st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True)
-                    
-                    if submit_button:
-                        if search_number:
-                            with st.spinner("Mencari..."):
-                                results = self.search_part_number(search_number)
-                                st.session_state.search_results = results
-                                st.session_state.search_type = "Part Number"
-                                st.session_state.search_term = search_number
-                                st.rerun()  # Force immediate update
-                        else:
-                            st.warning("Masukkan part number untuk mencari")
-            
-            with tab2:
-                with st.form(key="search_part_name_form", clear_on_submit=False):
-                    search_name = st.text_input(
-                        "Masukkan Part Name:",
-                        placeholder="Contoh: Bearing, Screw, Motor",
-                        key="search_part_name_input"
-                    )
-                    
-                    submit_button = st.form_submit_button("🔍 Cari Part Name", type="primary", use_container_width=True)
-                    
-                    if submit_button:
-                        if search_name:
-                            with st.spinner("Mencari..."):
-                                results = self.search_part_name(search_name)
-                                st.session_state.search_results = results
-                                st.session_state.search_type = "Part Name"
-                                st.session_state.search_term = search_name
-                                st.rerun()  # Force immediate update
-                        else:
-                            st.warning("Masukkan nama part untuk mencari")
-            
-            st.markdown('</div>', unsafe_allow_html=True)
-        
+
+        # ---- MAIN CONTENT ----
+        st.markdown('<div class="search-box">', unsafe_allow_html=True)
+        st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
+
+        tab1, tab2 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name"])
+
+        with tab1:
+            with st.form(key="search_pn_form", clear_on_submit=False):
+                sn_input = st.text_input("Masukkan Part Number:", placeholder="Contoh: ABC-123", key="sn_input")
+                if st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True):
+                    if sn_input:
+                        with st.spinner("Mencari…"):
+                            st.session_state.search_results = self.search_part_number(sn_input)
+                            st.session_state.search_type    = "Part Number"
+                            st.session_state.search_term    = sn_input
+                            st.rerun()
+                    else:
+                        st.warning("Masukkan part number untuk mencari.")
+
+        with tab2:
+            with st.form(key="search_name_form", clear_on_submit=False):
+                name_input = st.text_input("Masukkan Part Name:", placeholder="Contoh: Bearing, Screw", key="name_input")
+                if st.form_submit_button("🔍 Cari Part Name", type="primary", use_container_width=True):
+                    if name_input:
+                        with st.spinner("Mencari…"):
+                            st.session_state.search_results = self.search_part_name(name_input)
+                            st.session_state.search_type    = "Part Name"
+                            st.session_state.search_term    = name_input
+                            st.rerun()
+                    else:
+                        st.warning("Masukkan nama part untuk mencari.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
         self.display_search_results()
-    
+
     def display_search_results(self):
-        """Menampilkan hasil pencarian"""
-        if 'search_results' in st.session_state and st.session_state.search_results:
-            results = st.session_state.search_results
-            
+        results = st.session_state.get("search_results", [])
+        if results:
             st.markdown("---")
             st.markdown(f'<h3 class="sub-header">📋 Hasil Pencarian ({len(results)} ditemukan)</h3>', unsafe_allow_html=True)
-            
-            df_results = pd.DataFrame(results)
-            
-            display_cols = ['File', 'Part Number', 'Part Name', 'Quantity', 'Sheet', 'Excel Row']
-            available_cols = [col for col in display_cols if col in df_results.columns]
-            
-            if available_cols:
-                st.dataframe(
-                    df_results[available_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "File": st.column_config.TextColumn(width="medium"),
-                        "Part Number": st.column_config.TextColumn(width="medium"),
-                        "Part Name": st.column_config.TextColumn(width="large"),
-                        "Quantity": st.column_config.NumberColumn(width="small"),
-                        "Sheet": st.column_config.TextColumn(width="medium"),
-                        "Excel Row": st.column_config.NumberColumn(width="small")
-                    }
-                )
-            
-            with st.expander("📁 Detail File yang Ditemukan"):
-                for result in results:
-                    st.markdown(f"""
-                    **File**: {result['File']}
-                    - **Path**: `{result['Path']}`
-                    - **Sheet**: {result['Sheet']}
-                    - **Row**: {result['Excel Row']}
-                    """)
-        
-        elif 'search_results' in st.session_state and not st.session_state.search_results:
-            if 'search_term' in st.session_state:
-                st.warning(f"❌ Tidak ditemukan hasil untuk '{st.session_state.search_term}'")
-    
+            df_res = pd.DataFrame(results)
+            cols = [c for c in ["File", "Part Number", "Part Name", "Quantity", "Sheet", "Excel Row"] if c in df_res.columns]
+            st.dataframe(df_res[cols], use_container_width=True, hide_index=True,
+                         column_config={
+                             "File":        st.column_config.TextColumn(width="medium"),
+                             "Part Number": st.column_config.TextColumn(width="medium"),
+                             "Part Name":   st.column_config.TextColumn(width="large"),
+                             "Quantity":    st.column_config.NumberColumn(width="small"),
+                             "Sheet":       st.column_config.TextColumn(width="medium"),
+                             "Excel Row":   st.column_config.NumberColumn(width="small"),
+                         })
+            with st.expander("📁 Detail File"):
+                for r in results:
+                    st.markdown(f"**{r['File']}** — Path: `{r['Path']}` | Sheet: {r['Sheet']} | Row: {r['Excel Row']}")
+        elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
+            st.warning(f"❌ Tidak ditemukan hasil untuk '{st.session_state.search_term}'")
+
     def run(self):
-        """Menjalankan aplikasi"""
         self.display_dashboard()
 
+
+# ================================================
+# MAIN
+# ================================================
 def main():
-    """Fungsi utama untuk menjalankan aplikasi"""
-    app = ExcelSearchApp()
-    app.run()
+    LoginManager.init_session()
+    login_mgr = LoginManager()
+
+    if not LoginManager.is_authenticated():
+        render_login_page(login_mgr)
+    else:
+        ExcelSearchApp().run()
+
 
 if __name__ == "__main__":
     main()
