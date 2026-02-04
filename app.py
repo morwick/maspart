@@ -464,35 +464,65 @@ class ExcelSearchApp:
         return results
 
     def search_part_name(self, term):
-        results, seen = [], set()
+        """
+        Pencarian Part Name yang menampilkan SEMUA hasil yang mengandung kata kunci
+        tanpa batasan threshold atau limit per file.
+        
+        Menggunakan index untuk performa cepat.
+        Jika user mencari 'injector', maka semua baris yang mengandung kata 'injector'
+        di kolom Part Name akan ditampilkan dari semua file dan sheet.
+        """
+        results = []
         term_up = term.strip().upper()
+        
         if not term_up:
             return results
+        
+        # Loop semua file yang sudah diindeks
         for fi in st.session_state.excel_files:
-            sn = fi["simple_name"]
-            if sn in seen:
-                continue
+            df = fi["dataframe"]
             pni = fi.get("part_name_index", {})
-            found_idx = set()
-            for w in term_up.split():
-                if w in pni:
-                    found_idx.update(pni[w])
-            if found_idx:
-                idx   = min(found_idx)
-                row   = fi["dataframe"].iloc[idx]
-                pname = str(row["part_name"]) if pd.notna(row["part_name"]) else "N/A"
+            
+            # Gunakan index untuk mencari kata kunci yang cocok
+            matching_indices = set()
+            
+            # Cek setiap kata di term pencarian
+            search_words = term_up.split()
+            
+            # Ambil semua index yang mengandung kata kunci pencarian
+            for word in pni.keys():
+                # Cek apakah word di index mengandung salah satu kata pencarian
+                # ATAU salah satu kata pencarian ada di dalam word
+                for search_word in search_words:
+                    if search_word in word or word in search_word:
+                        matching_indices.update(pni[word])
+            
+            # Jika tidak ada hasil dari index, fallback ke pencarian manual
+            # (untuk kata yang sangat pendek atau tidak terindex)
+            if not matching_indices and len(term_up) <= 3:
+                for idx, row in df.iterrows():
+                    pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
+                    if term_up in pname.upper():
+                        matching_indices.add(idx)
+            
+            # Filter hasil agar benar-benar mengandung term lengkap
+            for idx in matching_indices:
+                row = df.iloc[idx]
+                pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
+                
+                # Validasi bahwa term pencarian benar-benar ada di Part Name
                 if term_up in pname.upper():
                     results.append({
-                        "File":        sn,
+                        "File":        fi["simple_name"],
                         "Path":        fi["relative_path"],
                         "Sheet":       fi["sheet"],
                         "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
-                        "Part Name":   pname,
-                        "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
+                        "Part Name":   pname if pname else "N/A",
+                        "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
                         "Excel Row":   idx + 2,
                         "Full Path":   fi["full_path"],
                     })
-                    seen.add(sn)
+        
         return results
 
     # ---------- UI ----------
