@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import pickle
 import hmac
+import re
+
 warnings.filterwarnings('ignore')
 
 # ==============================================
@@ -109,14 +111,6 @@ IMAGES_FOLDER           = Path("images")
 class LoginManager:
     """
     Autentikasi berbasis Excel di folder /login.
-
-    Struktur file (misal users.xlsx):
-    ┌─────┬──────────┬──────────┬───────┐
-    │  A  │    B     │    C     │   D   │
-    ├─────┼──────────┼──────────┼───────┤
-    │  1  │ admin    │ admin123 │ admin │
-    │  2  │ john     │ pass456  │ user  │
-    └─────┴──────────┴──────────┴───────┘
     """
 
     def __init__(self):
@@ -139,12 +133,10 @@ class LoginManager:
                     if len(df) == 0:
                         continue
 
-                    # buang header kalau ada
                     first = df.iloc[0].astype(str).str.strip().str.lower().tolist()
                     if any(v in ("username", "user", "nama") for v in first):
                         df = df.iloc[1:].reset_index(drop=True)
 
-                    # ambil kolom yang tepat
                     if len(df.columns) >= 4:
                         df = df.iloc[:, 1:4]
                     elif len(df.columns) == 3:
@@ -212,17 +204,13 @@ class LoginManager:
     def get_current_user():
         return st.session_state.get("current_user")
 
-    def reload_users(self):
-        st.session_state.login_users_df = LoginManager._load_users()
-
 
 # ================================================
-# HALAMAN LOGIN — simple, pakai kolom tengah
+# HALAMAN LOGIN
 # ================================================
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
 
-    # sembunyikan sidebar via CSS wrapper
     st.markdown("""
         <style>
             [data-testid="stSidebar"] { display: none !important; }
@@ -230,30 +218,23 @@ def render_login_page(login_mgr: LoginManager):
         </style>
     """, unsafe_allow_html=True)
 
-    # center kolom
     _, col, _ = st.columns([1, 2, 1])
 
     with col:
         st.markdown("<br><br>", unsafe_allow_html=True)
-
-        # logo + judul
         st.markdown("# 🔍 Part Number Finder", unsafe_allow_html=False)
         st.markdown("Silakan login untuk melanjutkan.", unsafe_allow_html=False)
         st.divider()
 
-        # error
         if error_msg:
             st.error(error_msg, icon="⚠️")
             st.session_state["login_error"] = None
 
-        # form
         with st.form(key="login_form", clear_on_submit=True):
             username  = st.text_input("👤 Username", placeholder="Masukkan username")
             password  = st.text_input("🔑 Password", type="password", placeholder="Masukkan password")
             submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
 
-
-    # logika auth (di luar kolom)
     if submitted:
         if not username or not password:
             st.session_state["login_error"] = "Username dan password tidak boleh kosong."
@@ -291,7 +272,6 @@ class ExcelSearchApp:
             st.session_state.loaded_files_count  = 0
             st.session_state.last_file_count     = 0
             st.session_state.file_hashes         = {}
-            st.session_state.search_index        = {"part_number": {}, "part_name": {}}
 
         if not st.session_state.excel_files:
             self.auto_load_excel_files()
@@ -330,12 +310,24 @@ class ExcelSearchApp:
         name = os.path.splitext(filename)[0]
         return name.split(" - ")[-1] if " - " in name else name
 
+    def normalize_base_part_number(self, pn: str) -> str:
+        """Mengambil bagian sebelum garis miring pertama (jika ada)"""
+        if not pn or pd.isna(pn):
+            return ""
+        pn_str = str(pn).strip().upper()
+        # Ambil bagian sebelum / pertama (atau seluruhnya jika tidak ada /)
+        base = pn_str.split("/", 1)[0].strip()
+        # Ganti karakter yang tidak aman untuk nama file
+        base = re.sub(r'[^A-Z0-9\-]', '_', base)
+        return base
+
     def get_image_path(self, part_number):
-        if not part_number or pd.isna(part_number):
+        base_pn = self.normalize_base_part_number(part_number)
+        if not base_pn:
             return None
-        pn = str(part_number).strip().upper().replace("/", "-").replace(" ", "_")
+
         for ext in self.supported_ext:
-            path = self.images_folder / f"{pn}{ext}"
+            path = self.images_folder / f"{base_pn}{ext}"
             if path.exists():
                 return path
         return None
@@ -455,6 +447,7 @@ class ExcelSearchApp:
         term_up = term.strip().upper()
         if not term_up:
             return results
+
         for fi in st.session_state.excel_files:
             sn = fi["simple_name"]
             if sn in seen:
@@ -473,7 +466,7 @@ class ExcelSearchApp:
                         "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
                         "Excel Row":   indices[0] + 2,
                         "Full Path":   fi["full_path"],
-                        "Image Path":  self.get_image_path(pn_value),
+                        "Image Path":  self.get_image_path(pn_value),  # ← sekarang pakai base PN
                     })
                     seen.add(sn)
                     break
@@ -530,7 +523,6 @@ class ExcelSearchApp:
 
         st.markdown('<h1 class="main-header">🔍 Part Number Finder</h1>', unsafe_allow_html=True)
 
-        # ---- SIDEBAR ----
         with st.sidebar:
             badge_cls = "role-admin" if role == "admin" else "role-user"
             st.markdown(
@@ -549,7 +541,6 @@ class ExcelSearchApp:
 
             st.divider()
 
-            # admin panel
             if role == "admin":
                 st.markdown("### 🛡️ Admin Panel")
                 if st.button("👥 Reload Users", type="secondary", use_container_width=True):
@@ -565,7 +556,6 @@ class ExcelSearchApp:
                         )
                 st.divider()
 
-            # status
             st.markdown("### 📊 Status Sistem")
             if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
                 for cf in CACHE_FOLDER.glob("*.pkl"):
@@ -596,10 +586,9 @@ class ExcelSearchApp:
                 3. **Part Number** → kolom B
                 4. **Part Name** → kolom D
 
-                **Optimasi aktif:**
-                - ✅ Parallel file processing
-                - ✅ Smart caching
-                - ✅ Index-based search
+                **Fitur gambar:**
+                • WG1642821034/1 → mencari WG1642821034.png
+                • WG1642821034-01 → tetap cari WG1642821034.png
                 """)
 
         # ---- MAIN CONTENT ----
@@ -610,7 +599,7 @@ class ExcelSearchApp:
 
         with tab1:
             with st.form(key="search_pn_form", clear_on_submit=False):
-                sn_input = st.text_input("Masukkan Part Number:", placeholder="Contoh: ABC-123", key="sn_input")
+                sn_input = st.text_input("Masukkan Part Number:", placeholder="Contoh: WG1642821034/1", key="sn_input")
                 if st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True):
                     if sn_input:
                         with st.spinner("Mencari…"):
@@ -654,20 +643,14 @@ class ExcelSearchApp:
                              "Excel Row":   st.column_config.NumberColumn(width="small"),
                          })
 
-            # ==========================================
-            # BAGIAN GAMBAR — HANYA UNTUK PART NUMBER
-            # ==========================================
             if st.session_state.get("search_type") == "Part Number":
                 st.markdown("### 🖼️ Gambar Part")
 
-                # Ambil semua part number unik
                 unique_pns = df_res["Part Number"].dropna().unique()
 
                 for pn in unique_pns:
-                    # Ambil baris-baris dengan part number ini
                     rows = df_res[df_res["Part Number"] == pn]
                     
-                    # Cari gambar pertama yang ada (jika ada)
                     img_path = None
                     part_name_example = "N/A"
                     for _, row in rows.iterrows():
@@ -675,11 +658,12 @@ class ExcelSearchApp:
                         if candidate and candidate.exists():
                             img_path = candidate
                             part_name_example = row["Part Name"]
-                            break  # cukup satu gambar saja
+                            break
 
-                    with st.expander(f"🖼️ {pn}", expanded=False):
+                    display_pn = pn  # tetap tampilkan part number asli (dengan /1 jika ada)
+                    with st.expander(f"🖼️ {display_pn}", expanded=False):
                         if img_path:
-                            st.image(str(img_path), caption=f"{pn} - {part_name_example}", use_column_width=True)
+                            st.image(str(img_path), caption=f"{display_pn} - {part_name_example}", use_column_width=True)
                         else:
                             st.caption("Tidak ada gambar tersedia")
 
