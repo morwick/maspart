@@ -40,7 +40,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    footer 
     .stDeployButton {display: none !important;}
     .viewerBadge_link__qRIco {display: none !important;}
     .viewerBadge_container__r5tak {display: none !important;}
