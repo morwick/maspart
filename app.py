@@ -100,6 +100,7 @@ SESSION_TIMEOUT_MINUTES = 30
 LOGIN_FOLDER            = Path("login")
 DATA_FOLDER             = Path("data")
 CACHE_FOLDER            = Path(".cache")
+IMAGES_FOLDER           = Path("images")
 
 
 # ================================================
@@ -212,7 +213,7 @@ class LoginManager:
         return st.session_state.get("current_user")
 
     def reload_users(self):
-        st.session_state.login_users_df = self._load_users()
+        st.session_state.login_users_df = LoginManager._load_users()
 
 
 # ================================================
@@ -277,7 +278,10 @@ class ExcelSearchApp:
     def __init__(self):
         self.data_folder  = DATA_FOLDER
         self.cache_folder = CACHE_FOLDER
+        self.images_folder = IMAGES_FOLDER
+        self.supported_ext = [".jpg", ".jpeg", ".png"]
         self.cache_folder.mkdir(exist_ok=True)
+        self.images_folder.mkdir(exist_ok=True)
 
         if "excel_files" not in st.session_state:
             st.session_state.excel_files         = []
@@ -325,6 +329,16 @@ class ExcelSearchApp:
     def extract_simple_filename(filename):
         name = os.path.splitext(filename)[0]
         return name.split(" - ")[-1] if " - " in name else name
+
+    def get_image_path(self, part_number):
+        if not part_number or pd.isna(part_number):
+            return None
+        pn = str(part_number).strip().upper().replace("/", "-").replace(" ", "_")
+        for ext in self.supported_ext:
+            path = self.images_folder / f"{pn}{ext}"
+            if path.exists():
+                return path
+        return None
 
     # ---------- process file ----------
     def process_single_file(self, file_path, relative_path):
@@ -449,68 +463,51 @@ class ExcelSearchApp:
             for indexed_pn, indices in fi.get("part_number_index", {}).items():
                 if term_up in indexed_pn:
                     row = df.iloc[indices[0]]
+                    pn_value = str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A"
                     results.append({
                         "File":        sn,
                         "Path":        fi["relative_path"],
                         "Sheet":       fi["sheet"],
-                        "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
+                        "Part Number": pn_value,
                         "Part Name":   str(row["part_name"])   if pd.notna(row["part_name"])   else "N/A",
                         "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
                         "Excel Row":   indices[0] + 2,
                         "Full Path":   fi["full_path"],
+                        "Image Path":  self.get_image_path(pn_value),
                     })
                     seen.add(sn)
                     break
         return results
 
     def search_part_name(self, term):
-        """
-        Pencarian Part Name yang menampilkan SEMUA hasil yang mengandung kata kunci
-        tanpa batasan threshold atau limit per file.
-        
-        Menggunakan index untuk performa cepat.
-        Jika user mencari 'injector', maka semua baris yang mengandung kata 'injector'
-        di kolom Part Name akan ditampilkan dari semua file dan sheet.
-        """
         results = []
         term_up = term.strip().upper()
         
         if not term_up:
             return results
         
-        # Loop semua file yang sudah diindeks
         for fi in st.session_state.excel_files:
             df = fi["dataframe"]
             pni = fi.get("part_name_index", {})
             
-            # Gunakan index untuk mencari kata kunci yang cocok
             matching_indices = set()
-            
-            # Cek setiap kata di term pencarian
             search_words = term_up.split()
             
-            # Ambil semua index yang mengandung kata kunci pencarian
             for word in pni.keys():
-                # Cek apakah word di index mengandung salah satu kata pencarian
-                # ATAU salah satu kata pencarian ada di dalam word
                 for search_word in search_words:
                     if search_word in word or word in search_word:
                         matching_indices.update(pni[word])
             
-            # Jika tidak ada hasil dari index, fallback ke pencarian manual
-            # (untuk kata yang sangat pendek atau tidak terindex)
             if not matching_indices and len(term_up) <= 3:
                 for idx, row in df.iterrows():
                     pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
                     if term_up in pname.upper():
                         matching_indices.add(idx)
             
-            # Filter hasil agar benar-benar mengandung term lengkap
             for idx in matching_indices:
                 row = df.iloc[idx]
                 pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
                 
-                # Validasi bahwa term pencarian benar-benar ada di Part Name
                 if term_up in pname.upper():
                     results.append({
                         "File":        fi["simple_name"],
@@ -521,6 +518,7 @@ class ExcelSearchApp:
                         "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
                         "Excel Row":   idx + 2,
                         "Full Path":   fi["full_path"],
+                        "Image Path":  None,
                     })
         
         return results
@@ -655,9 +653,36 @@ class ExcelSearchApp:
                              "Sheet":       st.column_config.TextColumn(width="medium"),
                              "Excel Row":   st.column_config.NumberColumn(width="small"),
                          })
-            with st.expander("📁 Detail File"):
-                for r in results:
-                    st.markdown(f"**{r['File']}** — Path: `{r['Path']}` | Sheet: {r['Sheet']} | Row: {r['Excel Row']}")
+
+            # ==========================================
+            # BAGIAN GAMBAR — HANYA UNTUK PART NUMBER
+            # ==========================================
+            if st.session_state.get("search_type") == "Part Number":
+                st.markdown("### 🖼️ Gambar Part")
+
+                # Ambil semua part number unik
+                unique_pns = df_res["Part Number"].dropna().unique()
+
+                for pn in unique_pns:
+                    # Ambil baris-baris dengan part number ini
+                    rows = df_res[df_res["Part Number"] == pn]
+                    
+                    # Cari gambar pertama yang ada (jika ada)
+                    img_path = None
+                    part_name_example = "N/A"
+                    for _, row in rows.iterrows():
+                        candidate = row.get("Image Path")
+                        if candidate and candidate.exists():
+                            img_path = candidate
+                            part_name_example = row["Part Name"]
+                            break  # cukup satu gambar saja
+
+                    with st.expander(f"🖼️ {pn}", expanded=False):
+                        if img_path:
+                            st.image(str(img_path), caption=f"{pn} - {part_name_example}", use_column_width=True)
+                        else:
+                            st.caption("Tidak ada gambar tersedia")
+
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
             st.warning(f"❌ Tidak ditemukan hasil untuk '{st.session_state.search_term}'")
 
