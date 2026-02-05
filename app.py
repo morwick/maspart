@@ -40,7 +40,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    footer 
     .stDeployButton {display: none !important;}
     .viewerBadge_link__qRIco {display: none !important;}
     .viewerBadge_container__r5tak {display: none !important;}
@@ -278,7 +278,7 @@ class ExcelSearchApp:
     def __init__(self):
         self.data_folder  = DATA_FOLDER
         self.cache_folder = CACHE_FOLDER
-        self.images_folder = Path(__file__).parent / "images"
+        self.images_folder = IMAGES_FOLDER
         self.supported_ext = [".jpg", ".jpeg", ".png"]
         self.cache_folder.mkdir(exist_ok=True)
         self.images_folder.mkdir(exist_ok=True)
@@ -635,16 +635,6 @@ class ExcelSearchApp:
                         st.warning("Masukkan nama part untuk mencari.")
 
         st.markdown("</div>", unsafe_allow_html=True)
-
-        # DEBUG sementara - hapus setelah selesai tes
-        st.markdown("---")
-        st.caption("**DEBUG Session State (cloud/lokal):**")
-        st.caption(f"search_type: {st.session_state.get('search_type')}")
-        st.caption(f"search_term: {st.session_state.get('search_term')}")
-        st.caption(f"search_results ada? {bool(st.session_state.get('search_results'))}")
-        st.caption(f"Jumlah hasil: {len(st.session_state.get('search_results', [])) if st.session_state.get('search_results') else 0}")
-        # akhir debug
-
         self.display_search_results()
 
     def display_search_results(self):
