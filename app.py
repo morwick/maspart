@@ -1,10 +1,10 @@
 """
-EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM + IMAGE VIEWER
-===========================================================================
+EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM
+=============================================================
 Login berbasis file Excel di folder /login
 - Struktur Excel: Kolom A = No, Kolom B = Username, Kolom C = Password, Kolom D = Role
 - Role: 'admin' atau 'user'
-- Menampilkan gambar dari folder /images jika nama file sesuai Part Number
+- Session-based login dengan auto-logout otomatis
 """
 
 import streamlit as st
@@ -17,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import pickle
 import hmac
-
 warnings.filterwarnings('ignore')
 
 # ==============================================
@@ -43,7 +42,15 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display: none !important;}
-    
+    .viewerBadge_link__qRIco {display: none !important;}
+    .viewerBadge_container__r5tak {display: none !important;}
+    [data-testid="collapsedControl"] {display: none !important;}
+    header[data-testid="stHeader"] {display: none !important;}
+    div[data-testid="stToolbar"] {display: none !important;}
+    div[data-testid="stToolbar"] > div {display: none !important;}
+    [title="Edit this app"] {display: none !important;}
+    iframe {display: none !important;}
+
     /* ── halaman utama ── */
     .main-header {
         font-size: 2.5rem;
@@ -93,7 +100,6 @@ SESSION_TIMEOUT_MINUTES = 30
 LOGIN_FOLDER            = Path("login")
 DATA_FOLDER             = Path("data")
 CACHE_FOLDER            = Path(".cache")
-IMAGES_FOLDER           = Path("images")  # <--- Folder Gambar
 
 
 # ================================================
@@ -102,6 +108,14 @@ IMAGES_FOLDER           = Path("images")  # <--- Folder Gambar
 class LoginManager:
     """
     Autentikasi berbasis Excel di folder /login.
+
+    Struktur file (misal users.xlsx):
+    ┌─────┬──────────┬──────────┬───────┐
+    │  A  │    B     │    C     │   D   │
+    ├─────┼──────────┼──────────┼───────┤
+    │  1  │ admin    │ admin123 │ admin │
+    │  2  │ john     │ pass456  │ user  │
+    └─────┴──────────┴──────────┴───────┘
     """
 
     def __init__(self):
@@ -197,13 +211,17 @@ class LoginManager:
     def get_current_user():
         return st.session_state.get("current_user")
 
+    def reload_users(self):
+        st.session_state.login_users_df = self._load_users()
+
 
 # ================================================
-# HALAMAN LOGIN
+# HALAMAN LOGIN — simple, pakai kolom tengah
 # ================================================
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
 
+    # sembunyikan sidebar via CSS wrapper
     st.markdown("""
         <style>
             [data-testid="stSidebar"] { display: none !important; }
@@ -211,23 +229,30 @@ def render_login_page(login_mgr: LoginManager):
         </style>
     """, unsafe_allow_html=True)
 
+    # center kolom
     _, col, _ = st.columns([1, 2, 1])
 
     with col:
         st.markdown("<br><br>", unsafe_allow_html=True)
+
+        # logo + judul
         st.markdown("# 🔍 Part Number Finder", unsafe_allow_html=False)
         st.markdown("Silakan login untuk melanjutkan.", unsafe_allow_html=False)
         st.divider()
 
+        # error
         if error_msg:
             st.error(error_msg, icon="⚠️")
             st.session_state["login_error"] = None
 
+        # form
         with st.form(key="login_form", clear_on_submit=True):
             username  = st.text_input("👤 Username", placeholder="Masukkan username")
             password  = st.text_input("🔑 Password", type="password", placeholder="Masukkan password")
             submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
 
+
+    # logika auth (di luar kolom)
     if submitted:
         if not username or not password:
             st.session_state["login_error"] = "Username dan password tidak boleh kosong."
@@ -252,11 +277,7 @@ class ExcelSearchApp:
     def __init__(self):
         self.data_folder  = DATA_FOLDER
         self.cache_folder = CACHE_FOLDER
-        self.images_folder = IMAGES_FOLDER
-        
-        # Init folders
         self.cache_folder.mkdir(exist_ok=True)
-        self.images_folder.mkdir(exist_ok=True) # Buat folder images jika belum ada
 
         if "excel_files" not in st.session_state:
             st.session_state.excel_files         = []
@@ -304,23 +325,6 @@ class ExcelSearchApp:
     def extract_simple_filename(filename):
         name = os.path.splitext(filename)[0]
         return name.split(" - ")[-1] if " - " in name else name
-
-    # ---------- IMAGE HELPER (NEW) ----------
-    def get_part_image_path(self, part_number):
-        """Mencari gambar di folder images yang namanya sesuai part number"""
-        if not part_number:
-            return None
-        
-        # Bersihkan part number dari karakter aneh (opsional, tergantung nama file)
-        # Tapi biasanya nama file = part number persis.
-        clean_pn = str(part_number).strip()
-        
-        # Cek ekstensi umum
-        for ext in [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]:
-            img_path = self.images_folder / f"{clean_pn}{ext}"
-            if img_path.exists():
-                return str(img_path)
-        return None
 
     # ---------- process file ----------
     def process_single_file(self, file_path, relative_path):
@@ -460,33 +464,53 @@ class ExcelSearchApp:
         return results
 
     def search_part_name(self, term):
+        """
+        Pencarian Part Name yang menampilkan SEMUA hasil yang mengandung kata kunci
+        tanpa batasan threshold atau limit per file.
+        
+        Menggunakan index untuk performa cepat.
+        Jika user mencari 'injector', maka semua baris yang mengandung kata 'injector'
+        di kolom Part Name akan ditampilkan dari semua file dan sheet.
+        """
         results = []
         term_up = term.strip().upper()
         
         if not term_up:
             return results
         
+        # Loop semua file yang sudah diindeks
         for fi in st.session_state.excel_files:
             df = fi["dataframe"]
             pni = fi.get("part_name_index", {})
+            
+            # Gunakan index untuk mencari kata kunci yang cocok
             matching_indices = set()
+            
+            # Cek setiap kata di term pencarian
             search_words = term_up.split()
             
+            # Ambil semua index yang mengandung kata kunci pencarian
             for word in pni.keys():
+                # Cek apakah word di index mengandung salah satu kata pencarian
+                # ATAU salah satu kata pencarian ada di dalam word
                 for search_word in search_words:
                     if search_word in word or word in search_word:
                         matching_indices.update(pni[word])
             
+            # Jika tidak ada hasil dari index, fallback ke pencarian manual
+            # (untuk kata yang sangat pendek atau tidak terindex)
             if not matching_indices and len(term_up) <= 3:
                 for idx, row in df.iterrows():
                     pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
                     if term_up in pname.upper():
                         matching_indices.add(idx)
             
+            # Filter hasil agar benar-benar mengandung term lengkap
             for idx in matching_indices:
                 row = df.iloc[idx]
                 pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
                 
+                # Validasi bahwa term pencarian benar-benar ada di Part Name
                 if term_up in pname.upper():
                     results.append({
                         "File":        fi["simple_name"],
@@ -527,6 +551,7 @@ class ExcelSearchApp:
 
             st.divider()
 
+            # admin panel
             if role == "admin":
                 st.markdown("### 🛡️ Admin Panel")
                 if st.button("👥 Reload Users", type="secondary", use_container_width=True):
@@ -542,6 +567,7 @@ class ExcelSearchApp:
                         )
                 st.divider()
 
+            # status
             st.markdown("### 📊 Status Sistem")
             if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
                 for cf in CACHE_FOLDER.glob("*.pkl"):
@@ -561,10 +587,21 @@ class ExcelSearchApp:
             st.markdown("### 📈 Statistik")
             st.metric("File Excel", st.session_state.get("loaded_files_count", 0))
 
-            with st.expander("📖 Panduan"):
+            st.divider()
+            st.markdown("### 📁 Struktur Folder")
+            st.info(f"File Excel dibaca dari:\n```\n{self.data_folder.absolute()}\n```")
+
+            with st.expander("📖 Panduan Cepat"):
                 st.markdown("""
                 1. Letakkan file Excel di folder `data/`
-                2. Letakkan gambar (JPG/PNG) di folder `images/` (nama file = Part Number).
+                2. Format: .xlsx, .xls, .xlsm
+                3. **Part Number** → kolom B
+                4. **Part Name** → kolom D
+
+                **Optimasi aktif:**
+                - ✅ Parallel file processing
+                - ✅ Smart caching
+                - ✅ Index-based search
                 """)
 
         # ---- MAIN CONTENT ----
@@ -607,8 +644,6 @@ class ExcelSearchApp:
         if results:
             st.markdown("---")
             st.markdown(f'<h3 class="sub-header">📋 Hasil Pencarian ({len(results)} ditemukan)</h3>', unsafe_allow_html=True)
-            
-            # --- TABEL HASIL ---
             df_res = pd.DataFrame(results)
             cols = [c for c in ["File", "Part Number", "Part Name", "Quantity", "Sheet", "Excel Row"] if c in df_res.columns]
             st.dataframe(df_res[cols], use_container_width=True, hide_index=True,
@@ -620,34 +655,9 @@ class ExcelSearchApp:
                              "Sheet":       st.column_config.TextColumn(width="medium"),
                              "Excel Row":   st.column_config.NumberColumn(width="small"),
                          })
-            
             with st.expander("📁 Detail File"):
                 for r in results:
                     st.markdown(f"**{r['File']}** — Path: `{r['Path']}` | Sheet: {r['Sheet']} | Row: {r['Excel Row']}")
-
-            # --- BAGIAN GAMBAR (FITUR BARU) ---
-            # Cari gambar untuk part number yang unik dari hasil pencarian
-            unique_pns = list(set(r['Part Number'] for r in results if r['Part Number'] != "N/A"))
-            
-            images_found = []
-            for pn in unique_pns:
-                img_path = self.get_part_image_path(pn)
-                if img_path:
-                    images_found.append((pn, img_path))
-            
-            if images_found:
-                st.markdown("### 🖼️ Preview Gambar")
-                st.caption("Klik tombol di bawah untuk melihat gambar part.")
-                
-                # Tampilkan dalam grid sederhana
-                cols = st.columns(3) # Maks 3 kolom per baris
-                for i, (pn, path) in enumerate(images_found):
-                    with cols[i % 3]:
-                        # Menggunakan expander sebagai tombol toggle sederhana
-                        with st.expander(f"📷 Lihat {pn}", expanded=False):
-                            # FIXED: Menggunakan use_column_width agar kompatibel dengan versi Streamlit lama
-                            st.image(path, caption=f"Part: {pn}", use_column_width=True)
-
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
             st.warning(f"❌ Tidak ditemukan hasil untuk '{st.session_state.search_term}'")
 
