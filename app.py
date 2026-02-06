@@ -278,6 +278,9 @@ class ExcelSearchApp:
             st.session_state.last_file_count     = 0
             st.session_state.file_hashes         = {}
 
+        if not st.session_state.excel_files:
+            self.auto_load_excel_files()
+
     # ---------- helpers ----------
     def create_data_folder(self):
         if not self.data_folder.exists():
@@ -347,14 +350,6 @@ class ExcelSearchApp:
             st.session_state.stok_data = self.stok_cache
             return self.stok_cache
 
-        stok_hash = self.get_file_hash(self.stok_file)
-        if stok_hash:
-            cached = self.load_file_cache(self.stok_file, stok_hash)
-            if cached:
-                self.stok_cache = cached
-                st.session_state.stok_data = self.stok_cache
-                return self.stok_cache
-
         try:
             df_stok = pd.read_excel(
                 self.stok_file,
@@ -372,9 +367,6 @@ class ExcelSearchApp:
 
             self.stok_cache = dict(zip(df_stok["part_number"], df_stok["stok"].fillna("—")))
             st.session_state.stok_data = self.stok_cache
-
-            if stok_hash:
-                self.save_file_cache(self.stok_file, stok_hash, self.stok_cache)
 
         except Exception as e:
             st.error(f"Gagal membaca stok.xlsx → {e}")
