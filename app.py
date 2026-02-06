@@ -264,6 +264,11 @@ class ExcelSearchApp:
         self.cache_folder.mkdir(exist_ok=True)
         self.images_folder.mkdir(exist_ok=True)
 
+        # === TAMBAHAN: file stok ===
+        self.stok_file = DATA_FOLDER / "stok" / "stok.xlsx"
+        self.stok_cache = None
+        self._load_stok_data()
+
         if "excel_files" not in st.session_state:
             st.session_state.excel_files         = []
             st.session_state.index_data          = []
@@ -315,9 +320,7 @@ class ExcelSearchApp:
         if not pn or pd.isna(pn):
             return ""
         pn_str = str(pn).strip().upper()
-        # Ambil bagian sebelum / pertama (atau seluruhnya jika tidak ada /)
         base = pn_str.split("/", 1)[0].strip()
-        # Ganti karakter yang tidak aman untuk nama file
         base = re.sub(r'[^A-Z0-9\-]', '_', base)
         return base
 
@@ -331,6 +334,46 @@ class ExcelSearchApp:
             if path.exists():
                 return path
         return None
+
+    # === TAMBAHAN: load data stok ===
+    def _load_stok_data(self):
+        if self.stok_cache is not None:
+            return self.stok_cache
+
+        if "stok_data" in st.session_state:
+            self.stok_cache = st.session_state.stok_data
+            return self.stok_cache
+
+        if not self.stok_file.exists():
+            st.warning("File stok tidak ditemukan: data/stok/stok.xlsx")
+            self.stok_cache = {}
+            st.session_state.stok_data = self.stok_cache
+            return self.stok_cache
+
+        try:
+            df_stok = pd.read_excel(
+                self.stok_file,
+                usecols=[0, 3],  # kolom A (index 0) dan D (index 3)
+                header=None,
+                dtype=str
+            )
+            # skip header jika ada
+            if len(df_stok) > 0 and any(str(x).lower() in ["part number", "kode", "no part"] for x in df_stok.iloc[0]):
+                df_stok = df_stok.iloc[1:]
+
+            df_stok.columns = ["part_number", "stok"]
+            df_stok["part_number"] = df_stok["part_number"].astype(str).str.strip().str.upper()
+            df_stok = df_stok.dropna(subset=["part_number"])
+
+            self.stok_cache = dict(zip(df_stok["part_number"], df_stok["stok"].fillna("—")))
+            st.session_state.stok_data = self.stok_cache
+
+        except Exception as e:
+            st.error(f"Gagal membaca stok.xlsx → {e}")
+            self.stok_cache = {}
+            st.session_state.stok_data = self.stok_cache
+
+        return self.stok_cache
 
     # ---------- process file ----------
     def process_single_file(self, file_path, relative_path):
@@ -448,6 +491,8 @@ class ExcelSearchApp:
         if not term_up:
             return results
 
+        stok_dict = self._load_stok_data()
+
         for fi in st.session_state.excel_files:
             sn = fi["simple_name"]
             if sn in seen:
@@ -456,7 +501,11 @@ class ExcelSearchApp:
             for indexed_pn, indices in fi.get("part_number_index", {}).items():
                 if term_up in indexed_pn:
                     row = df.iloc[indices[0]]
-                    pn_value = str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A"
+                    pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
+                    
+                    # Ambil stok (case-insensitive match)
+                    stok_value = stok_dict.get(pn_value.upper(), "—")
+
                     results.append({
                         "File":        sn,
                         "Path":        fi["relative_path"],
@@ -464,9 +513,10 @@ class ExcelSearchApp:
                         "Part Number": pn_value,
                         "Part Name":   str(row["part_name"])   if pd.notna(row["part_name"])   else "N/A",
                         "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
+                        "Stok":        stok_value,
                         "Excel Row":   indices[0] + 2,
                         "Full Path":   fi["full_path"],
-                        "Image Path":  self.get_image_path(pn_value),  # ← sekarang pakai base PN
+                        "Image Path":  self.get_image_path(pn_value),
                     })
                     seen.add(sn)
                     break
@@ -509,6 +559,7 @@ class ExcelSearchApp:
                         "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
                         "Part Name":   pname if pname else "N/A",
                         "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
+                        "Stok":        "—",   # stok hanya untuk search part number
                         "Excel Row":   idx + 2,
                         "Full Path":   fi["full_path"],
                         "Image Path":  None,
@@ -589,6 +640,11 @@ class ExcelSearchApp:
                 **Fitur gambar:**
                 • WG1642821034/1 → mencari WG1642821034.png
                 • WG1642821034-01 → tetap cari WG1642821034.png
+                
+                **Stok:**
+                • Diambil dari data/stok/stok.xlsx
+                • Kolom A = Part Number
+                • Kolom D = Stok
                 """)
 
         # ---- MAIN CONTENT ----
@@ -632,13 +688,14 @@ class ExcelSearchApp:
             st.markdown("---")
             st.markdown(f'<h3 class="sub-header">📋 Hasil Pencarian ({len(results)} ditemukan)</h3>', unsafe_allow_html=True)
             df_res = pd.DataFrame(results)
-            cols = [c for c in ["File", "Part Number", "Part Name", "Quantity", "Sheet", "Excel Row"] if c in df_res.columns]
+            cols = [c for c in ["File", "Part Number", "Part Name", "Quantity", "Stok", "Sheet", "Excel Row"] if c in df_res.columns]
             st.dataframe(df_res[cols], use_container_width=True, hide_index=True,
                          column_config={
                              "File":        st.column_config.TextColumn(width="medium"),
                              "Part Number": st.column_config.TextColumn(width="medium"),
                              "Part Name":   st.column_config.TextColumn(width="large"),
                              "Quantity":    st.column_config.NumberColumn(width="small"),
+                             "Stok":        st.column_config.TextColumn(width="small"),
                              "Sheet":       st.column_config.TextColumn(width="medium"),
                              "Excel Row":   st.column_config.NumberColumn(width="small"),
                          })
@@ -660,7 +717,7 @@ class ExcelSearchApp:
                             part_name_example = row["Part Name"]
                             break
 
-                    display_pn = pn  # tetap tampilkan part number asli (dengan /1 jika ada)
+                    display_pn = pn
                     with st.expander(f"🖼️ {display_pn}", expanded=False):
                         if img_path:
                             st.image(str(img_path), caption=f"{display_pn} - {part_name_example}", use_column_width=True)
