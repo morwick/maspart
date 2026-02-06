@@ -485,7 +485,6 @@ class ExcelSearchApp:
                     row = df.iloc[indices[0]]
                     pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
                     
-                    # Stok diambil dari cache (sangat cepat)
                     stok_value = self.stok_cache.get(pn_value.upper(), "—") if self.stok_cache else "—"
 
                     results.append({
@@ -534,14 +533,17 @@ class ExcelSearchApp:
                 pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
                 
                 if term_up in pname.upper():
+                    pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
+                    stok_value = self.stok_cache.get(pn_value.upper(), "—") if self.stok_cache else "—"
+
                     results.append({
                         "File":        fi["simple_name"],
                         "Path":        fi["relative_path"],
                         "Sheet":       fi["sheet"],
-                        "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
+                        "Part Number": pn_value,
                         "Part Name":   pname if pname else "N/A",
                         "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
-                        "Stok":        "—",
+                        "Stok":        stok_value,   # ← perubahan utama di sini
                         "Excel Row":   idx + 2,
                         "Full Path":   fi["full_path"],
                         "Image Path":  None,
