@@ -42,18 +42,16 @@ st.set_page_config(
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
-    footer 
+    footer {visibility: hidden;}
     .stDeployButton {display: none !important;}
     .viewerBadge_link__qRIco {display: none !important;}
     .viewerBadge_container__r5tak {display: none !important;}
     [data-testid="collapsedControl"] {display: none !important;}
     header[data-testid="stHeader"] {display: none !important;}
     div[data-testid="stToolbar"] {display: none !important;}
-    div[data-testid="stToolbar"] > div {display: none !important;}
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
 
-    /* ── halaman utama ── */
     .main-header {
         font-size: 2.5rem;
         color: #1E88E5;
@@ -88,7 +86,6 @@ st.markdown("""
     .role-admin { color: #E65100; font-weight: 700; }
     .role-user  { color: #1565C0; font-weight: 600; }
 
-    /* ── hide sidebar on login ── */
     .hide-sidebar [data-testid="stSidebar"] { display: none !important; }
     .hide-sidebar [data-testid="collapsedControl"] { display: none !important; }
 </style>
@@ -109,10 +106,6 @@ IMAGES_FOLDER           = Path("images")
 # LOGIN MANAGER
 # ================================================
 class LoginManager:
-    """
-    Autentikasi berbasis Excel di folder /login.
-    """
-
     def __init__(self):
         LOGIN_FOLDER.mkdir(parents=True, exist_ok=True)
         if "login_users_df" not in st.session_state:
@@ -267,7 +260,7 @@ class ExcelSearchApp:
         # === TAMBAHAN: file stok ===
         self.stok_file = DATA_FOLDER / "stok" / "stok.xlsx"
         self.stok_cache = None
-        self._load_stok_data()
+        self._load_stok_data()  # Load sekali di awal
 
         if "excel_files" not in st.session_state:
             st.session_state.excel_files         = []
@@ -281,7 +274,6 @@ class ExcelSearchApp:
         if not st.session_state.excel_files:
             self.auto_load_excel_files()
 
-    # ---------- helpers ----------
     def create_data_folder(self):
         if not self.data_folder.exists():
             self.data_folder.mkdir(parents=True)
@@ -316,7 +308,6 @@ class ExcelSearchApp:
         return name.split(" - ")[-1] if " - " in name else name
 
     def normalize_base_part_number(self, pn: str) -> str:
-        """Mengambil bagian sebelum garis miring pertama (jika ada)"""
         if not pn or pd.isna(pn):
             return ""
         pn_str = str(pn).strip().upper()
@@ -335,29 +326,27 @@ class ExcelSearchApp:
                 return path
         return None
 
-    # === TAMBAHAN: load data stok ===
     def _load_stok_data(self):
         if self.stok_cache is not None:
-            return self.stok_cache
+            return
 
         if "stok_data" in st.session_state:
             self.stok_cache = st.session_state.stok_data
-            return self.stok_cache
+            return
 
         if not self.stok_file.exists():
             st.warning("File stok tidak ditemukan: data/stok/stok.xlsx")
             self.stok_cache = {}
             st.session_state.stok_data = self.stok_cache
-            return self.stok_cache
+            return
 
         try:
             df_stok = pd.read_excel(
                 self.stok_file,
-                usecols=[0, 3],  # kolom A (index 0) dan D (index 3)
+                usecols=[0, 3],
                 header=None,
                 dtype=str
             )
-            # skip header jika ada
             if len(df_stok) > 0 and any(str(x).lower() in ["part number", "kode", "no part"] for x in df_stok.iloc[0]):
                 df_stok = df_stok.iloc[1:]
 
@@ -373,9 +362,6 @@ class ExcelSearchApp:
             self.stok_cache = {}
             st.session_state.stok_data = self.stok_cache
 
-        return self.stok_cache
-
-    # ---------- process file ----------
     def process_single_file(self, file_path, relative_path):
         results     = []
         file_name   = file_path.name
@@ -427,7 +413,6 @@ class ExcelSearchApp:
             self.save_file_cache(file_path, file_hash, results)
         return results
 
-    # ---------- auto-load ----------
     def auto_load_excel_files(self):
         try:
             self.create_data_folder()
@@ -484,14 +469,11 @@ class ExcelSearchApp:
         except Exception as e:
             st.sidebar.error(f"Error auto-load: {e}")
 
-    # ---------- search ----------
     def search_part_number(self, term):
         results, seen = [], set()
         term_up = term.strip().upper()
         if not term_up:
             return results
-
-        stok_dict = self._load_stok_data()
 
         for fi in st.session_state.excel_files:
             sn = fi["simple_name"]
@@ -503,8 +485,8 @@ class ExcelSearchApp:
                     row = df.iloc[indices[0]]
                     pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
                     
-                    # Ambil stok (case-insensitive match)
-                    stok_value = stok_dict.get(pn_value.upper(), "—")
+                    # Stok diambil dari cache (sangat cepat)
+                    stok_value = self.stok_cache.get(pn_value.upper(), "—") if self.stok_cache else "—"
 
                     results.append({
                         "File":        sn,
@@ -559,7 +541,7 @@ class ExcelSearchApp:
                         "Part Number": str(row["part_number"]) if pd.notna(row["part_number"]) else "N/A",
                         "Part Name":   pname if pname else "N/A",
                         "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
-                        "Stok":        "—",   # stok hanya untuk search part number
+                        "Stok":        "—",
                         "Excel Row":   idx + 2,
                         "Full Path":   fi["full_path"],
                         "Image Path":  None,
@@ -567,7 +549,6 @@ class ExcelSearchApp:
         
         return results
 
-    # ---------- UI ----------
     def display_dashboard(self):
         user = LoginManager.get_current_user()
         role = user["role"] if user else "user"
