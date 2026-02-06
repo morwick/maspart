@@ -41,16 +41,20 @@ st.set_page_config(
 # ==============================================
 st.markdown("""
 <style>
+    /* Elemen yang selalu disembunyikan */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display: none !important;}
     .viewerBadge_link__qRIco {display: none !important;}
     .viewerBadge_container__r5tak {display: none !important;}
-    [data-testid="collapsedControl"] {display: none !important;}
     header[data-testid="stHeader"] {display: none !important;}
     div[data-testid="stToolbar"] {display: none !important;}
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
+
+    /* Hanya aktif di halaman login */
+    .login-page [data-testid="stSidebar"] { display: none !important; }
+    .login-page [data-testid="collapsedControl"] { display: none !important; }
 
     .main-header {
         font-size: 2.5rem;
@@ -85,9 +89,6 @@ st.markdown("""
     }
     .role-admin { color: #E65100; font-weight: 700; }
     .role-user  { color: #1565C0; font-weight: 600; }
-
-    .hide-sidebar [data-testid="stSidebar"] { display: none !important; }
-    .hide-sidebar [data-testid="collapsedControl"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -204,12 +205,8 @@ class LoginManager:
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
 
-    st.markdown("""
-        <style>
-            [data-testid="stSidebar"] { display: none !important; }
-            [data-testid="collapsedControl"] { display: none !important; }
-        </style>
-    """, unsafe_allow_html=True)
+    # Tambahkan class khusus hanya di halaman login
+    st.markdown('<div class="login-page">', unsafe_allow_html=True)
 
     _, col, _ = st.columns([1, 2, 1])
 
@@ -242,6 +239,8 @@ def render_login_page(login_mgr: LoginManager):
         else:
             st.session_state["login_error"] = "Username atau password salah. Periksa kembali."
             st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ================================================
@@ -543,7 +542,7 @@ class ExcelSearchApp:
                         "Part Number": pn_value,
                         "Part Name":   pname if pname else "N/A",
                         "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
-                        "Stok":        stok_value,   # ← perubahan utama di sini
+                        "Stok":        stok_value,
                         "Excel Row":   idx + 2,
                         "Full Path":   fi["full_path"],
                         "Image Path":  None,
