@@ -1,10 +1,11 @@
 """
-EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM
+EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM + THRESHOLD
 =============================================================
 Login berbasis file Excel di folder /login
 - Struktur Excel: Kolom A = No, Kolom B = Username, Kolom C = Password, Kolom D = Role
 - Role: 'admin' atau 'user'
 - Session-based login dengan auto-logout otomatis
+- Fitur Threshold khusus Admin
 """
 
 import streamlit as st
@@ -28,7 +29,7 @@ st.set_page_config(
     page_title="Part Number Finder",
     page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded",  # Force expanded agar lebih konsisten di Cloud
     menu_items={
         'Get Help': None,
         'Report a bug': None,
@@ -37,7 +38,7 @@ st.set_page_config(
 )
 
 # ==============================================
-# CSS — hide menu + styling
+# CSS — hide menu + styling (diperbaiki untuk sidebar)
 # ==============================================
 st.markdown("""
 <style>
@@ -52,9 +53,18 @@ st.markdown("""
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
 
-    /* Hanya aktif di halaman login */
-    .login-page [data-testid="stSidebar"] { display: none !important; }
-    .login-page [data-testid="collapsedControl"] { display: none !important; }
+    /* Hanya sembunyikan ISI sidebar saat di halaman login, tapi biarkan tombol expand tetap ada */
+    .login-page [data-testid="stSidebar"] > div {
+        display: none !important;
+    }
+
+    /* Pastikan tombol expand/collapse sidebar tetap terlihat dan clickable */
+    [data-testid="collapsedControl"] {
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        z-index: 9999 !important;
+    }
 
     .main-header {
         font-size: 2.5rem;
@@ -256,10 +266,15 @@ class ExcelSearchApp:
         self.cache_folder.mkdir(exist_ok=True)
         self.images_folder.mkdir(exist_ok=True)
 
-        # === TAMBAHAN: file stok ===
+        # === File stok ===
         self.stok_file = DATA_FOLDER / "stok" / "stok.xlsx"
         self.stok_cache = None
-        self._load_stok_data()  # Load sekali di awal
+        self._load_stok_data()
+
+        # === File threshold ===
+        self.threshold_file = DATA_FOLDER / "stok" / "threshold.xlsx"
+        self.threshold_cache = None
+        self._load_threshold_data()
 
         if "excel_files" not in st.session_state:
             st.session_state.excel_files         = []
@@ -360,6 +375,85 @@ class ExcelSearchApp:
             st.error(f"Gagal membaca stok.xlsx → {e}")
             self.stok_cache = {}
             st.session_state.stok_data = self.stok_cache
+
+    def _load_threshold_data(self):
+        if self.threshold_cache is not None:
+            return
+
+        if "threshold_data" in st.session_state:
+            self.threshold_cache = st.session_state.threshold_data
+            return
+
+        if not self.threshold_file.exists():
+            self.threshold_cache = {}
+            st.session_state.threshold_data = self.threshold_cache
+            return
+
+        try:
+            df_threshold = pd.read_excel(
+                self.threshold_file,
+                usecols=[0, 1],
+                header=None,
+                dtype=str
+            )
+            
+            if len(df_threshold) > 0 and any(str(x).lower() in ["part number", "kode", "no part", "threshold"] for x in df_threshold.iloc[0]):
+                df_threshold = df_threshold.iloc[1:]
+
+            df_threshold.columns = ["part_number", "threshold"]
+            df_threshold["part_number"] = df_threshold["part_number"].astype(str).str.strip().str.upper()
+            df_threshold = df_threshold.dropna(subset=["part_number"])
+
+            self.threshold_cache = dict(zip(df_threshold["part_number"], df_threshold["threshold"].fillna("0")))
+            st.session_state.threshold_data = self.threshold_cache
+
+        except Exception as e:
+            st.error(f"Gagal membaca threshold.xlsx → {e}")
+            self.threshold_cache = {}
+            st.session_state.threshold_data = self.threshold_cache
+
+    def get_threshold_alerts(self):
+        results = []
+        
+        if not self.stok_cache or not self.threshold_cache:
+            return results
+
+        for part_number, threshold_str in self.threshold_cache.items():
+            try:
+                threshold = float(threshold_str)
+            except (ValueError, TypeError):
+                continue
+
+            stok_str = self.stok_cache.get(part_number, "0")
+            try:
+                stok = float(stok_str)
+            except (ValueError, TypeError):
+                continue
+
+            if stok < threshold:
+                qty_needed = int(threshold - stok)
+                
+                part_name = "N/A"
+                for fi in st.session_state.excel_files:
+                    df = fi["dataframe"]
+                    pn_idx = fi.get("part_number_index", {})
+                    
+                    if part_number in pn_idx:
+                        indices = pn_idx[part_number]
+                        if indices:
+                            row = df.iloc[indices[0]]
+                            part_name = str(row["part_name"]) if pd.notna(row["part_name"]) else "N/A"
+                            break
+
+                results.append({
+                    "Part Number": part_number,
+                    "Part Name": part_name,
+                    "Stok Saat Ini": int(stok),
+                    "Minimal Stok": int(threshold),
+                    "Qty": qty_needed
+                })
+
+        return results
 
     def process_single_file(self, file_path, relative_path):
         results     = []
@@ -468,6 +562,7 @@ class ExcelSearchApp:
         except Exception as e:
             st.sidebar.error(f"Error auto-load: {e}")
 
+    @st.cache_data(ttl=300, show_spinner=False)
     def search_part_number(self, term):
         results, seen = [], set()
         term_up = term.strip().upper()
@@ -502,6 +597,7 @@ class ExcelSearchApp:
                     break
         return results
 
+    @st.cache_data(ttl=300, show_spinner=False)
     def search_part_name(self, term):
         results = []
         term_up = term.strip().upper()
@@ -596,8 +692,12 @@ class ExcelSearchApp:
                         cf.unlink()
                     except Exception:
                         pass
-                for k in ("excel_files", "last_index_time", "last_file_count"):
+                for k in ("excel_files", "last_index_time", "last_file_count", "stok_data", "threshold_data"):
                     st.session_state.pop(k, None)
+                self.stok_cache = None
+                self.threshold_cache = None
+                self._load_stok_data()
+                self._load_threshold_data()
                 self.auto_load_excel_files()
                 st.rerun()
 
@@ -627,13 +727,21 @@ class ExcelSearchApp:
                 • Diambil dari data/stok/stok.xlsx
                 • Kolom A = Part Number
                 • Kolom D = Stok
+                
+                **Threshold (Admin only):**
+                • Diambil dari data/stok/threshold.xlsx
+                • Kolom A = Part Number
+                • Kolom B = Minimal Stok
                 """)
 
         # ---- MAIN CONTENT ----
         st.markdown('<div class="search-box">', unsafe_allow_html=True)
         st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
 
-        tab1, tab2 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name"])
+        if role == "admin":
+            tab1, tab2, tab3 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name", "⚠️ Threshold"])
+        else:
+            tab1, tab2 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name"])
 
         with tab1:
             with st.form(key="search_pn_form", clear_on_submit=False):
@@ -660,6 +768,34 @@ class ExcelSearchApp:
                             st.rerun()
                     else:
                         st.warning("Masukkan nama part untuk mencari.")
+
+        if role == "admin":
+            with tab3:
+                st.markdown("**Part yang stoknya di bawah threshold minimal:**")
+                st.markdown("---")
+                
+                threshold_results = self.get_threshold_alerts()
+                
+                if threshold_results:
+                    st.markdown(f"**🚨 {len(threshold_results)} part memerlukan perhatian:**")
+                    df_threshold = pd.DataFrame(threshold_results)
+                    st.dataframe(
+                        df_threshold,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Part Number": st.column_config.TextColumn(width="medium"),
+                            "Part Name": st.column_config.TextColumn(width="large"),
+                            "Stok Saat Ini": st.column_config.NumberColumn(width="small"),
+                            "Minimal Stok": st.column_config.NumberColumn(width="small"),
+                            "Qty": st.column_config.NumberColumn(
+                                width="small",
+                                help="Jumlah yang perlu dipesan untuk mencapai minimal stok"
+                            ),
+                        }
+                    )
+                else:
+                    st.success("✅ Semua part memiliki stok mencukupi!")
 
         st.markdown("</div>", unsafe_allow_html=True)
         self.display_search_results()
