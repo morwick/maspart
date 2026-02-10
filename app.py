@@ -259,6 +259,9 @@ class ExcelSearchApp:
         # === TAMBAHAN: file stok ===
         self.stok_file = DATA_FOLDER / "stok" / "stok.xlsx"
         self.stok_cache = None
+        self.stok_history = {}
+        self.total_keluar = {}
+        self._load_stok_history()
         self._load_stok_data()  # Load sekali di awal
 
         if "excel_files" not in st.session_state:
@@ -272,6 +275,26 @@ class ExcelSearchApp:
 
         if not st.session_state.excel_files:
             self.auto_load_excel_files()
+
+    def _load_stok_history(self):
+        cache_file = self.cache_folder / "stok_history.pkl"
+        if cache_file.exists():
+            try:
+                with open(cache_file, "rb") as f:
+                    data = pickle.load(f)
+                    self.stok_history = data.get('history', {})
+                    self.total_keluar = data.get('total_keluar', {})
+            except Exception:
+                self.stok_history = {}
+                self.total_keluar = {}
+
+    def _save_stok_history(self):
+        cache_file = self.cache_folder / "stok_history.pkl"
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump({'history': self.stok_history, 'total_keluar': self.total_keluar}, f)
+        except Exception:
+            pass
 
     def create_data_folder(self):
         if not self.data_folder.exists():
@@ -355,6 +378,35 @@ class ExcelSearchApp:
 
             self.stok_cache = dict(zip(df_stok["part_number"], df_stok["stok"].fillna("—")))
             st.session_state.stok_data = self.stok_cache
+
+            # Update history setelah load stok
+            now = datetime.now()
+            updated = False
+            for part, stok in self.stok_cache.items():
+                if stok == "—":
+                    continue
+                try:
+                    stok_int = int(stok)
+                except ValueError:
+                    continue
+
+                if part not in self.stok_history:
+                    self.stok_history[part] = []
+
+                if self.stok_history[part]:
+                    last_time, last_stok = self.stok_history[part][-1]
+                    if stok_int != last_stok:
+                        delta = last_stok - stok_int
+                        if delta > 0:
+                            self.total_keluar[part] = self.total_keluar.get(part, 0) + delta
+                        self.stok_history[part].append((now, stok_int))
+                        updated = True
+                else:
+                    self.stok_history[part].append((now, stok_int))
+                    updated = True
+
+            if updated:
+                self._save_stok_history()
 
         except Exception as e:
             st.error(f"Gagal membaca stok.xlsx → {e}")
@@ -596,8 +648,9 @@ class ExcelSearchApp:
                         cf.unlink()
                     except Exception:
                         pass
-                for k in ("excel_files", "last_index_time", "last_file_count"):
+                for k in ("excel_files", "last_index_time", "last_file_count", "stok_data"):
                     st.session_state.pop(k, None)
+                self._load_stok_data()
                 self.auto_load_excel_files()
                 st.rerun()
 
@@ -633,7 +686,11 @@ class ExcelSearchApp:
         st.markdown('<div class="search-box">', unsafe_allow_html=True)
         st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
 
-        tab1, tab2 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name"])
+        if role == "admin":
+            tabs = st.tabs(["🔢 Search Part Number", "📝 Search Part Name", "📊 Part Sering Keluar"])
+            tab1, tab2, tab3 = tabs
+        else:
+            tab1, tab2 = st.tabs(["🔢 Search Part Number", "📝 Search Part Name"])
 
         with tab1:
             with st.form(key="search_pn_form", clear_on_submit=False):
@@ -660,6 +717,16 @@ class ExcelSearchApp:
                             st.rerun()
                     else:
                         st.warning("Masukkan nama part untuk mencari.")
+
+        if role == "admin":
+            with tab3:
+                st.markdown("### Part yang Sering Keluar")
+                if self.total_keluar:
+                    data = [{'Part Number': part, 'Total Keluar': total} for part, total in sorted(self.total_keluar.items(), key=lambda x: x[1], reverse=True)]
+                    df = pd.DataFrame(data)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Belum ada data keluar.")
 
         st.markdown("</div>", unsafe_allow_html=True)
         self.display_search_results()
