@@ -29,7 +29,7 @@ st.set_page_config(
     page_title="Part Number Finder",
     page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded",  # Force expanded agar lebih konsisten di Cloud
+    initial_sidebar_state="expanded",
     menu_items={
         'Get Help': None,
         'Report a bug': None,
@@ -38,7 +38,7 @@ st.set_page_config(
 )
 
 # ==============================================
-# CSS — hide menu + styling (diperbaiki untuk sidebar)
+# CSS — hide menu + styling
 # ==============================================
 st.markdown("""
 <style>
@@ -53,12 +53,12 @@ st.markdown("""
     [title="Edit this app"] {display: none !important;}
     iframe {display: none !important;}
 
-    /* Hanya sembunyikan ISI sidebar saat di halaman login, tapi biarkan tombol expand tetap ada */
+    /* Hanya sembunyikan ISI sidebar saat di halaman login */
     .login-page [data-testid="stSidebar"] > div {
         display: none !important;
     }
 
-    /* Pastikan tombol expand/collapse sidebar tetap terlihat dan clickable */
+    /* Pastikan tombol expand/collapse sidebar tetap terlihat */
     [data-testid="collapsedControl"] {
         display: block !important;
         visibility: visible !important;
@@ -215,7 +215,7 @@ class LoginManager:
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
 
-    # Tambahkan class khusus hanya di halaman login
+    # Tambahkan class khusus untuk halaman login
     st.markdown('<div class="login-page">', unsafe_allow_html=True)
 
     _, col, _ = st.columns([1, 2, 1])
@@ -254,6 +254,94 @@ def render_login_page(login_mgr: LoginManager):
 
 
 # ================================================
+# FUNGSI PENCARIAN TANPA CACHE DECORATOR
+# ================================================
+def search_part_number(term, excel_files, stok_cache):
+    """Fungsi pencarian Part Number - tanpa cache decorator"""
+    results, seen = [], set()
+    term_up = term.strip().upper()
+    
+    if not term_up:
+        return results
+
+    for fi in excel_files:
+        sn = fi["simple_name"]
+        if sn in seen:
+            continue
+        df = fi["dataframe"]
+        for indexed_pn, indices in fi.get("part_number_index", {}).items():
+            if term_up in indexed_pn:
+                row = df.iloc[indices[0]]
+                pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
+                
+                stok_value = stok_cache.get(pn_value.upper(), "—") if stok_cache else "—"
+
+                results.append({
+                    "File":        sn,
+                    "Path":        fi["relative_path"],
+                    "Sheet":       fi["sheet"],
+                    "Part Number": pn_value,
+                    "Part Name":   str(row["part_name"])   if pd.notna(row["part_name"])   else "N/A",
+                    "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
+                    "Stok":        stok_value,
+                    "Excel Row":   indices[0] + 2,
+                    "Full Path":   fi["full_path"]
+                })
+                seen.add(sn)
+                break
+    return results
+
+
+def search_part_name(term, excel_files, stok_cache):
+    """Fungsi pencarian Part Name - tanpa cache decorator"""
+    results = []
+    term_up = term.strip().upper()
+    
+    if not term_up:
+        return results
+    
+    for fi in excel_files:
+        df = fi["dataframe"]
+        pni = fi.get("part_name_index", {})
+        
+        matching_indices = set()
+        search_words = term_up.split()
+        
+        for word in pni.keys():
+            for search_word in search_words:
+                if search_word in word or word in search_word:
+                    matching_indices.update(pni[word])
+        
+        if not matching_indices and len(term_up) <= 3:
+            for idx, row in df.iterrows():
+                pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
+                if term_up in pname.upper():
+                    matching_indices.add(idx)
+        
+        for idx in matching_indices:
+            row = df.iloc[idx]
+            pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
+            
+            if term_up in pname.upper():
+                pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
+                stok_value = stok_cache.get(pn_value.upper(), "—") if stok_cache else "—"
+
+                results.append({
+                    "File":        fi["simple_name"],
+                    "Path":        fi["relative_path"],
+                    "Sheet":       fi["sheet"],
+                    "Part Number": pn_value,
+                    "Part Name":   pname if pname else "N/A",
+                    "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
+                    "Stok":        stok_value,
+                    "Excel Row":   idx + 2,
+                    "Full Path":   fi["full_path"]
+                })
+    
+    return results
+
+
+# ================================================
 # APLIKASI PENCARIAN
 # ================================================
 class ExcelSearchApp:
@@ -276,6 +364,7 @@ class ExcelSearchApp:
         self.threshold_cache = None
         self._load_threshold_data()
 
+        # === Inisialisasi session state ===
         if "excel_files" not in st.session_state:
             st.session_state.excel_files         = []
             st.session_state.index_data          = []
@@ -285,6 +374,7 @@ class ExcelSearchApp:
             st.session_state.last_file_count     = 0
             st.session_state.file_hashes         = {}
 
+        # === Auto load file Excel ===
         if not st.session_state.excel_files:
             self.auto_load_excel_files()
 
@@ -562,90 +652,6 @@ class ExcelSearchApp:
         except Exception as e:
             st.sidebar.error(f"Error auto-load: {e}")
 
-    @st.cache_data(ttl=300, show_spinner=False)
-    def search_part_number(self, term):
-        results, seen = [], set()
-        term_up = term.strip().upper()
-        if not term_up:
-            return results
-
-        for fi in st.session_state.excel_files:
-            sn = fi["simple_name"]
-            if sn in seen:
-                continue
-            df = fi["dataframe"]
-            for indexed_pn, indices in fi.get("part_number_index", {}).items():
-                if term_up in indexed_pn:
-                    row = df.iloc[indices[0]]
-                    pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
-                    
-                    stok_value = self.stok_cache.get(pn_value.upper(), "—") if self.stok_cache else "—"
-
-                    results.append({
-                        "File":        sn,
-                        "Path":        fi["relative_path"],
-                        "Sheet":       fi["sheet"],
-                        "Part Number": pn_value,
-                        "Part Name":   str(row["part_name"])   if pd.notna(row["part_name"])   else "N/A",
-                        "Quantity":    str(row["quantity"])    if pd.notna(row["quantity"])    else "N/A",
-                        "Stok":        stok_value,
-                        "Excel Row":   indices[0] + 2,
-                        "Full Path":   fi["full_path"],
-                        "Image Path":  self.get_image_path(pn_value),
-                    })
-                    seen.add(sn)
-                    break
-        return results
-
-    @st.cache_data(ttl=300, show_spinner=False)
-    def search_part_name(self, term):
-        results = []
-        term_up = term.strip().upper()
-        
-        if not term_up:
-            return results
-        
-        for fi in st.session_state.excel_files:
-            df = fi["dataframe"]
-            pni = fi.get("part_name_index", {})
-            
-            matching_indices = set()
-            search_words = term_up.split()
-            
-            for word in pni.keys():
-                for search_word in search_words:
-                    if search_word in word or word in search_word:
-                        matching_indices.update(pni[word])
-            
-            if not matching_indices and len(term_up) <= 3:
-                for idx, row in df.iterrows():
-                    pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
-                    if term_up in pname.upper():
-                        matching_indices.add(idx)
-            
-            for idx in matching_indices:
-                row = df.iloc[idx]
-                pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
-                
-                if term_up in pname.upper():
-                    pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
-                    stok_value = self.stok_cache.get(pn_value.upper(), "—") if self.stok_cache else "—"
-
-                    results.append({
-                        "File":        fi["simple_name"],
-                        "Path":        fi["relative_path"],
-                        "Sheet":       fi["sheet"],
-                        "Part Number": pn_value,
-                        "Part Name":   pname if pname else "N/A",
-                        "Quantity":    str(row["quantity"]) if pd.notna(row["quantity"]) else "N/A",
-                        "Stok":        stok_value,
-                        "Excel Row":   idx + 2,
-                        "Full Path":   fi["full_path"],
-                        "Image Path":  None,
-                    })
-        
-        return results
-
     def display_dashboard(self):
         user = LoginManager.get_current_user()
         role = user["role"] if user else "user"
@@ -749,7 +755,12 @@ class ExcelSearchApp:
                 if st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True):
                     if sn_input:
                         with st.spinner("Mencari…"):
-                            st.session_state.search_results = self.search_part_number(sn_input)
+                            # Panggil fungsi pencarian tanpa cache decorator
+                            st.session_state.search_results = search_part_number(
+                                sn_input, 
+                                st.session_state.excel_files, 
+                                self.stok_cache
+                            )
                             st.session_state.search_type    = "Part Number"
                             st.session_state.search_term    = sn_input
                             st.rerun()
@@ -762,7 +773,12 @@ class ExcelSearchApp:
                 if st.form_submit_button("🔍 Cari Part Name", type="primary", use_container_width=True):
                     if name_input:
                         with st.spinner("Mencari…"):
-                            st.session_state.search_results = self.search_part_name(name_input)
+                            # Panggil fungsi pencarian tanpa cache decorator
+                            st.session_state.search_results = search_part_name(
+                                name_input, 
+                                st.session_state.excel_files, 
+                                self.stok_cache
+                            )
                             st.session_state.search_type    = "Part Name"
                             st.session_state.search_term    = name_input
                             st.rerun()
@@ -829,7 +845,7 @@ class ExcelSearchApp:
                     img_path = None
                     part_name_example = "N/A"
                     for _, row in rows.iterrows():
-                        candidate = row.get("Image Path")
+                        candidate = self.get_image_path(pn)
                         if candidate and candidate.exists():
                             img_path = candidate
                             part_name_example = row["Part Name"]
