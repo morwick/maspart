@@ -6,6 +6,7 @@ Login berbasis file Excel di folder /login
 - Role: 'admin' atau 'user'
 - Session-based login dengan auto-logout otomatis
 - Fitur Threshold khusus Admin
+- Keep-alive: ping otomatis setiap 5 menit agar tidak sleep di Streamlit Cloud
 """
 
 import streamlit as st
@@ -36,6 +37,47 @@ st.set_page_config(
         'About': None
     }
 )
+
+# ==============================================
+# KEEP-ALIVE: Cegah Streamlit Cloud Sleep
+# ==============================================
+# Inject JS yang mengirim fetch ke endpoint Streamlit setiap 5 menit
+# sekaligus memperbarui timestamp agar sesi tetap hidup.
+KEEP_ALIVE_JS = """
+<script>
+(function() {
+    // Hindari injeksi duplikat
+    if (window.__keepAliveActive) return;
+    window.__keepAliveActive = true;
+
+    const INTERVAL_MS = 5 * 60 * 1000; // 5 menit
+
+    function ping() {
+        // Fetch ke halaman itu sendiri — cukup untuk mencegah sleep
+        fetch(window.location.href, { method: 'GET', cache: 'no-store' })
+            .then(function(r) {
+                console.log('[KeepAlive] ping ok', new Date().toLocaleTimeString());
+            })
+            .catch(function(e) {
+                console.warn('[KeepAlive] ping gagal:', e);
+            });
+    }
+
+    // Mulai interval
+    window.__keepAliveTimer = setInterval(ping, INTERVAL_MS);
+
+    // Ping pertama setelah 1 menit
+    setTimeout(ping, 60 * 1000);
+
+    console.log('[KeepAlive] Aktif — interval', INTERVAL_MS / 60000, 'menit');
+})();
+</script>
+"""
+
+def inject_keep_alive():
+    """Inject keep-alive JS ke halaman Streamlit."""
+    st.components.v1.html(KEEP_ALIVE_JS, height=0, scrolling=False)
+
 
 # ==============================================
 # CSS — hide menu + styling
@@ -99,6 +141,9 @@ st.markdown("""
     }
     .role-admin { color: #E65100; font-weight: 700; }
     .role-user  { color: #1565C0; font-weight: 600; }
+
+    /* Sembunyikan iframe keep-alive agar tidak menggeser layout */
+    iframe[height="0"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -171,9 +216,9 @@ class LoginManager:
             return None
         if hmac.compare_digest(password.strip(), row.iloc[0]["password"]):
             return {
-                "username":   username,
-                "role":       row.iloc[0]["role"],
-                "login_time": datetime.now(),
+                "username":    username,
+                "role":        row.iloc[0]["role"],
+                "login_time":  datetime.now(),
                 "last_active": datetime.now(),
             }
         return None
@@ -214,6 +259,9 @@ class LoginManager:
 # ================================================
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
+
+    # Keep-alive tetap aktif di halaman login
+    inject_keep_alive()
 
     # Tambahkan class khusus untuk halaman login
     st.markdown('<div class="login-page">', unsafe_allow_html=True)
@@ -260,7 +308,7 @@ def search_part_number(term, excel_files, stok_cache):
     """Fungsi pencarian Part Number - tanpa cache decorator"""
     results, seen = [], set()
     term_up = term.strip().upper()
-    
+
     if not term_up:
         return results
 
@@ -273,7 +321,7 @@ def search_part_number(term, excel_files, stok_cache):
             if term_up in indexed_pn:
                 row = df.iloc[indices[0]]
                 pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
-                
+
                 stok_value = stok_cache.get(pn_value.upper(), "—") if stok_cache else "—"
 
                 results.append({
@@ -296,32 +344,32 @@ def search_part_name(term, excel_files, stok_cache):
     """Fungsi pencarian Part Name - tanpa cache decorator"""
     results = []
     term_up = term.strip().upper()
-    
+
     if not term_up:
         return results
-    
+
     for fi in excel_files:
         df = fi["dataframe"]
         pni = fi.get("part_name_index", {})
-        
+
         matching_indices = set()
         search_words = term_up.split()
-        
+
         for word in pni.keys():
             for search_word in search_words:
                 if search_word in word or word in search_word:
                     matching_indices.update(pni[word])
-        
+
         if not matching_indices and len(term_up) <= 3:
             for idx, row in df.iterrows():
                 pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
                 if term_up in pname.upper():
                     matching_indices.add(idx)
-        
+
         for idx in matching_indices:
             row = df.iloc[idx]
             pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
-            
+
             if term_up in pname.upper():
                 pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
                 stok_value = stok_cache.get(pn_value.upper(), "—") if stok_cache else "—"
@@ -337,7 +385,7 @@ def search_part_name(term, excel_files, stok_cache):
                     "Excel Row":   idx + 2,
                     "Full Path":   fi["full_path"]
                 })
-    
+
     return results
 
 
@@ -347,20 +395,20 @@ def search_part_name(term, excel_files, stok_cache):
 class ExcelSearchApp:
 
     def __init__(self):
-        self.data_folder  = DATA_FOLDER
-        self.cache_folder = CACHE_FOLDER
+        self.data_folder   = DATA_FOLDER
+        self.cache_folder  = CACHE_FOLDER
         self.images_folder = IMAGES_FOLDER
         self.supported_ext = [".jpg", ".jpeg", ".png"]
         self.cache_folder.mkdir(exist_ok=True)
         self.images_folder.mkdir(exist_ok=True)
 
         # === File stok ===
-        self.stok_file = DATA_FOLDER / "stok" / "stok.xlsx"
+        self.stok_file  = DATA_FOLDER / "stok" / "stok.xlsx"
         self.stok_cache = None
         self._load_stok_data()
 
         # === File threshold ===
-        self.threshold_file = DATA_FOLDER / "stok" / "threshold.xlsx"
+        self.threshold_file  = DATA_FOLDER / "stok" / "threshold.xlsx"
         self.threshold_cache = None
         self._load_threshold_data()
 
@@ -423,7 +471,6 @@ class ExcelSearchApp:
         base_pn = self.normalize_base_part_number(part_number)
         if not base_pn:
             return None
-
         for ext in self.supported_ext:
             path = self.images_folder / f"{base_pn}{ext}"
             if path.exists():
@@ -486,7 +533,7 @@ class ExcelSearchApp:
                 header=None,
                 dtype=str
             )
-            
+
             if len(df_threshold) > 0 and any(str(x).lower() in ["part number", "kode", "no part", "threshold"] for x in df_threshold.iloc[0]):
                 df_threshold = df_threshold.iloc[1:]
 
@@ -504,7 +551,7 @@ class ExcelSearchApp:
 
     def get_threshold_alerts(self):
         results = []
-        
+
         if not self.stok_cache or not self.threshold_cache:
             return results
 
@@ -522,12 +569,12 @@ class ExcelSearchApp:
 
             if stok < threshold:
                 qty_needed = int(threshold - stok)
-                
+
                 part_name = "N/A"
                 for fi in st.session_state.excel_files:
                     df = fi["dataframe"]
                     pn_idx = fi.get("part_number_index", {})
-                    
+
                     if part_number in pn_idx:
                         indices = pn_idx[part_number]
                         if indices:
@@ -536,11 +583,11 @@ class ExcelSearchApp:
                             break
 
                 results.append({
-                    "Part Number": part_number,
-                    "Part Name": part_name,
+                    "Part Number":  part_number,
+                    "Part Name":    part_name,
                     "Stok Saat Ini": int(stok),
                     "Minimal Stok": int(threshold),
-                    "Qty": qty_needed
+                    "Qty":          qty_needed
                 })
 
         return results
@@ -656,6 +703,9 @@ class ExcelSearchApp:
         user = LoginManager.get_current_user()
         role = user["role"] if user else "user"
 
+        # ── Keep-alive aktif untuk semua user yang sudah login ──
+        inject_keep_alive()
+
         st.markdown('<h1 class="main-header">🔍 Part Number Finder</h1>', unsafe_allow_html=True)
 
         with st.sidebar:
@@ -700,7 +750,7 @@ class ExcelSearchApp:
                         pass
                 for k in ("excel_files", "last_index_time", "last_file_count", "stok_data", "threshold_data"):
                     st.session_state.pop(k, None)
-                self.stok_cache = None
+                self.stok_cache      = None
                 self.threshold_cache = None
                 self._load_stok_data()
                 self._load_threshold_data()
@@ -728,12 +778,12 @@ class ExcelSearchApp:
                 **Fitur gambar:**
                 • WG1642821034/1 → mencari WG1642821034.png
                 • WG1642821034-01 → tetap cari WG1642821034.png
-                
+
                 **Stok:**
                 • Diambil dari data/stok/stok.xlsx
                 • Kolom A = Part Number
                 • Kolom D = Stok
-                
+
                 **Threshold (Admin only):**
                 • Diambil dari data/stok/threshold.xlsx
                 • Kolom A = Part Number
@@ -755,14 +805,13 @@ class ExcelSearchApp:
                 if st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True):
                     if sn_input:
                         with st.spinner("Mencari…"):
-                            # Panggil fungsi pencarian tanpa cache decorator
                             st.session_state.search_results = search_part_number(
-                                sn_input, 
-                                st.session_state.excel_files, 
+                                sn_input,
+                                st.session_state.excel_files,
                                 self.stok_cache
                             )
-                            st.session_state.search_type    = "Part Number"
-                            st.session_state.search_term    = sn_input
+                            st.session_state.search_type = "Part Number"
+                            st.session_state.search_term = sn_input
                             st.rerun()
                     else:
                         st.warning("Masukkan part number untuk mencari.")
@@ -773,14 +822,13 @@ class ExcelSearchApp:
                 if st.form_submit_button("🔍 Cari Part Name", type="primary", use_container_width=True):
                     if name_input:
                         with st.spinner("Mencari…"):
-                            # Panggil fungsi pencarian tanpa cache decorator
                             st.session_state.search_results = search_part_name(
-                                name_input, 
-                                st.session_state.excel_files, 
+                                name_input,
+                                st.session_state.excel_files,
                                 self.stok_cache
                             )
-                            st.session_state.search_type    = "Part Name"
-                            st.session_state.search_term    = name_input
+                            st.session_state.search_type = "Part Name"
+                            st.session_state.search_term = name_input
                             st.rerun()
                     else:
                         st.warning("Masukkan nama part untuk mencari.")
@@ -789,9 +837,9 @@ class ExcelSearchApp:
             with tab3:
                 st.markdown("**Part yang stoknya di bawah threshold minimal:**")
                 st.markdown("---")
-                
+
                 threshold_results = self.get_threshold_alerts()
-                
+
                 if threshold_results:
                     st.markdown(f"**🚨 {len(threshold_results)} part memerlukan perhatian:**")
                     df_threshold = pd.DataFrame(threshold_results)
@@ -800,11 +848,11 @@ class ExcelSearchApp:
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            "Part Number": st.column_config.TextColumn(width="medium"),
-                            "Part Name": st.column_config.TextColumn(width="large"),
+                            "Part Number":   st.column_config.TextColumn(width="medium"),
+                            "Part Name":     st.column_config.TextColumn(width="large"),
                             "Stok Saat Ini": st.column_config.NumberColumn(width="small"),
-                            "Minimal Stok": st.column_config.NumberColumn(width="small"),
-                            "Qty": st.column_config.NumberColumn(
+                            "Minimal Stok":  st.column_config.NumberColumn(width="small"),
+                            "Qty":           st.column_config.NumberColumn(
                                 width="small",
                                 help="Jumlah yang perlu dipesan untuk mencapai minimal stok"
                             ),
@@ -841,7 +889,7 @@ class ExcelSearchApp:
 
                 for pn in unique_pns:
                     rows = df_res[df_res["Part Number"] == pn]
-                    
+
                     img_path = None
                     part_name_example = "N/A"
                     for _, row in rows.iterrows():
