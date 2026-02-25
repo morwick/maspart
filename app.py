@@ -67,7 +67,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-SESSION_TIMEOUT_MINUTES = 30
+SESSION_TIMEOUT_MINUTES = 75
 LOGIN_FOLDER   = Path("login")
 DATA_FOLDER    = Path("data")
 CACHE_FOLDER   = Path(".cache")
@@ -902,3 +902,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
