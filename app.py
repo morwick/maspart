@@ -15,6 +15,8 @@ import pickle
 import hmac
 import re
 import io
+import json
+import requests
 
 warnings.filterwarnings('ignore')
 
@@ -68,10 +70,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 SESSION_TIMEOUT_MINUTES = 75
-LOGIN_FOLDER   = Path("login")
-DATA_FOLDER    = Path("data")
-CACHE_FOLDER   = Path(".cache")
-IMAGES_FOLDER  = Path("images")
+LOGIN_FOLDER    = Path("login")
+DATA_FOLDER     = Path("data")
+CACHE_FOLDER    = Path(".cache")
+IMAGES_FOLDER   = Path("images")
+IMAGES_JSON     = Path("images") / "image_links.json"
 
 
 class LoginManager:
@@ -174,7 +177,7 @@ def render_login_page(login_mgr: LoginManager):
         with st.form(key="login_form", clear_on_submit=True):
             username  = st.text_input("👤 Username", placeholder="Masukkan username")
             password  = st.text_input("🔑 Password", type="password", placeholder="Masukkan password")
-            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("Login", type="primary", width="stretch")
     if submitted:
         if not username or not password:
             st.session_state["login_error"] = "Username dan password tidak boleh kosong."
@@ -351,6 +354,7 @@ class ExcelSearchApp:
         self.threshold_cache = None
         self._load_stok_data()
         self._load_threshold_data()
+        self._load_image_links()
 
         if "excel_files" not in st.session_state:
             st.session_state.excel_files        = []
@@ -413,6 +417,62 @@ class ExcelSearchApp:
             if p.exists():
                 return p
         return None
+
+    def _load_image_links(self):
+        """Load image links from images/image_links.json"""
+        if "image_links" in st.session_state:
+            self.image_links = st.session_state.image_links
+            return
+        self.image_links = {}
+        if IMAGES_JSON.exists():
+            try:
+                with open(IMAGES_JSON, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                # Normalize keys to uppercase, values always list of strings
+                for pn_key, links in raw.items():
+                    norm_key = str(pn_key).strip().upper()
+                    if isinstance(links, list):
+                        self.image_links[norm_key] = [str(l) for l in links if l]
+                    elif isinstance(links, str) and links:
+                        self.image_links[norm_key] = [links]
+                st.session_state.image_links = self.image_links
+            except Exception as e:
+                st.warning(f"Gagal membaca image_links.json: {e}")
+
+    def get_image_links(self, pn):
+        """Return list of image URLs for a part number, or empty list."""
+        if not pn:
+            return []
+        pn_up = str(pn).strip().upper()
+        # Try exact match first
+        if pn_up in self.image_links:
+            return self.image_links[pn_up]
+        # Try base (before '/')
+        base = pn_up.split("/", 1)[0].strip()
+        if base in self.image_links:
+            return self.image_links[base]
+        return []
+
+    @staticmethod
+    def fetch_image_bytes(url: str):
+        """Fetch image from URL and return bytes."""
+        try:
+            resp = requests.get(url, timeout=15,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200:
+                content_type = resp.headers.get("Content-Type", "")
+                if any(t in content_type for t in ("image", "octet-stream", "jpeg", "png", "gif", "webp")):
+                    return resp.content, None
+                if len(resp.content) > 1000:
+                    return resp.content, None
+                return None, f"Konten bukan gambar (Content-Type: {content_type})"
+            return None, f"HTTP {resp.status_code}"
+        except requests.exceptions.ConnectionError:
+            return None, "Tidak dapat terhubung ke server"
+        except requests.exceptions.Timeout:
+            return None, "Timeout: server tidak merespons"
+        except Exception as e:
+            return None, str(e)
 
     def _load_stok_data(self):
         if self.stok_cache is not None:
@@ -633,10 +693,10 @@ class ExcelSearchApp:
 
         with st.expander("👁️ Preview Part Number"):
             st.dataframe(pd.DataFrame({"Part Number": part_numbers}),
-                         use_container_width=True, hide_index=True, height=200)
+                         width="stretch", hide_index=True, height=200)
 
         if not st.button("🔍 Proses Batch Search", type="primary",
-                         use_container_width=True, key="batch_process_btn"):
+                         width="stretch", key="batch_process_btn"):
             return
 
         if not st.session_state.excel_files:
@@ -694,7 +754,7 @@ class ExcelSearchApp:
         disp_cols = ["Part Number","Hasil","Sheet","Part Name","Qty","Stok","Status"]
         st.dataframe(
             df_result[disp_cols],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Part Number": st.column_config.TextColumn(width="medium"),
@@ -716,7 +776,7 @@ class ExcelSearchApp:
             file_name=f"batch_result_{timestamp}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     # ── SIDEBAR & DASHBOARD ──────────────────────────────────────────────────
@@ -735,7 +795,7 @@ class ExcelSearchApp:
             )
             st.caption(f"Login pukul {user['login_time'].strftime('%H:%M')} · Timeout {SESSION_TIMEOUT_MINUTES} min")
 
-            if st.button("🚪 Logout", type="secondary", use_container_width=True):
+            if st.button("🚪 Logout", type="secondary", width="stretch"):
                 LoginManager.logout()
                 for k in ("excel_files","index_data","search_results",
                           "last_index_time","loaded_files_count","last_file_count"):
@@ -745,7 +805,7 @@ class ExcelSearchApp:
 
             if role == "admin":
                 st.markdown("### 🛡️ Admin Panel")
-                if st.button("👥 Reload Users", type="secondary", use_container_width=True):
+                if st.button("👥 Reload Users", type="secondary", width="stretch"):
                     st.session_state.login_users_df = LoginManager._load_users()
                     st.toast("✅ Data user telah di-reload!")
                 df_users = st.session_state.get("login_users_df", pd.DataFrame())
@@ -753,11 +813,11 @@ class ExcelSearchApp:
                     with st.expander("📋 Daftar User"):
                         st.dataframe(df_users[["username","role"]].rename(
                             columns={"username":"Username","role":"Role"}),
-                            hide_index=True, use_container_width=True)
+                            hide_index=True, width="stretch")
                 st.divider()
 
             st.markdown("### 📊 Status Sistem")
-            if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
+            if st.button("🔄 Refresh Data", type="secondary", width="stretch"):
                 for cf in CACHE_FOLDER.glob("*.pkl"):
                     try: cf.unlink()
                     except Exception: pass
@@ -802,7 +862,7 @@ class ExcelSearchApp:
         with tab1:
             with st.form(key="search_pn_form", clear_on_submit=False):
                 sn_input = st.text_input("Masukkan Part Number:", placeholder="Contoh: WG1642821034/1", key="sn_input")
-                if st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True):
+                if st.form_submit_button("🔍 Cari Part Number", type="primary", width="stretch"):
                     if sn_input:
                         with st.spinner("Mencari…"):
                             st.session_state.search_results = search_part_number(
@@ -816,7 +876,7 @@ class ExcelSearchApp:
         with tab2:
             with st.form(key="search_name_form", clear_on_submit=False):
                 name_input = st.text_input("Masukkan Part Name:", placeholder="Contoh: Bearing, Screw", key="name_input")
-                if st.form_submit_button("🔍 Cari Part Name", type="primary", use_container_width=True):
+                if st.form_submit_button("🔍 Cari Part Name", type="primary", width="stretch"):
                     if name_input:
                         with st.spinner("Mencari…"):
                             st.session_state.search_results = search_part_name(
@@ -834,7 +894,7 @@ class ExcelSearchApp:
                 threshold_results = self.get_threshold_alerts()
                 if threshold_results:
                     st.markdown(f"**🚨 {len(threshold_results)} part memerlukan perhatian:**")
-                    st.dataframe(pd.DataFrame(threshold_results), use_container_width=True, hide_index=True,
+                    st.dataframe(pd.DataFrame(threshold_results), width="stretch", hide_index=True,
                                  column_config={
                                      "Part Number":   st.column_config.TextColumn(width="medium"),
                                      "Part Name":     st.column_config.TextColumn(width="large"),
@@ -860,7 +920,7 @@ class ExcelSearchApp:
             df_res = pd.DataFrame(results)
             cols = [c for c in ["File","Part Number","Part Name","Quantity","Stok","Sheet","Excel Row"]
                     if c in df_res.columns]
-            st.dataframe(df_res[cols], use_container_width=True, hide_index=True,
+            st.dataframe(df_res[cols], width="stretch", hide_index=True,
                          column_config={
                              "File":        st.column_config.TextColumn(width="medium"),
                              "Part Number": st.column_config.TextColumn(width="medium"),
@@ -874,14 +934,84 @@ class ExcelSearchApp:
                 st.markdown("### 🖼️ Gambar Part")
                 for pn in df_res["Part Number"].dropna().unique():
                     rows = df_res[df_res["Part Number"] == pn]
-                    img_path = None; pname_ex = "N/A"
-                    for _, row in rows.iterrows():
-                        candidate = self.get_image_path(pn)
-                        if candidate and candidate.exists():
-                            img_path = candidate; pname_ex = row["Part Name"]; break
+                    pname_ex = rows.iloc[0]["Part Name"] if not rows.empty else "N/A"
+
+                    # Pastikan image_links sudah di-load
+                    if not hasattr(self, 'image_links') or self.image_links is None:
+                        self._load_image_links()
+
+                    # 1) Cek link dari JSON
+                    img_links = self.get_image_links(pn)
+                    # 2) Fallback ke file lokal
+                    img_path = self.get_image_path(pn)
+                    if img_path and not img_path.exists():
+                        img_path = None
+
                     with st.expander(f"🖼️ {pn}", expanded=False):
-                        if img_path:
-                            st.image(str(img_path), caption=f"{pn} - {pname_ex}", use_column_width=True)
+                        if img_links:
+                            # Session state key untuk index gambar per PN
+                            idx_key = f"img_idx_{pn}"
+                            if idx_key not in st.session_state:
+                                st.session_state[idx_key] = 0
+
+                            total = len(img_links)
+                            current_idx = st.session_state[idx_key]
+
+                            # Navigasi panah (hanya tampil jika > 1 gambar)
+                            if total > 1:
+                                col_prev, col_info, col_next = st.columns([1, 3, 1])
+                                with col_prev:
+                                    if st.button("◀ Prev", key=f"prev_{pn}",
+                                                 disabled=(current_idx == 0),
+                                                 width="stretch"):
+                                        st.session_state[idx_key] = max(0, current_idx - 1)
+                                        st.rerun()
+                                with col_info:
+                                    st.markdown(
+                                        f"<div style='text-align:center; padding:6px 0; "
+                                        f"font-weight:600; color:#1565C0;'>"
+                                        f"Gambar {current_idx + 1} / {total}</div>",
+                                        unsafe_allow_html=True
+                                    )
+                                with col_next:
+                                    if st.button("Next ▶", key=f"next_{pn}",
+                                                 disabled=(current_idx == total - 1),
+                                                 width="stretch"):
+                                        st.session_state[idx_key] = min(total - 1, current_idx + 1)
+                                        st.rerun()
+
+                            # Tampilkan gambar aktif (fetch via requests agar HTTP URL pun bisa tampil)
+                            active_url = img_links[current_idx]
+                            with st.spinner("Memuat gambar..."):
+                                img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
+                            if img_bytes:
+                                try:
+                                    st.image(
+                                        img_bytes,
+                                        caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
+                                        width="stretch"
+                                    )
+                                except Exception as e:
+                                    st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
+                                    st.caption(f"URL: {active_url}")
+                            else:
+                                st.warning(f"⚠️ Gagal memuat gambar: {err}")
+                                st.caption(f"URL: {active_url}")
+
+                            # Thumbnail strip (jika > 1)
+                            if total > 1:
+                                st.markdown("**Pilih gambar:**")
+                                thumb_cols = st.columns(min(total, 5))
+                                for ti, (tc, lnk) in enumerate(zip(thumb_cols, img_links)):
+                                    with tc:
+                                        label = f"{'✅' if ti == current_idx else '🔲'} {ti+1}"
+                                        if st.button(label, key=f"thumb_{pn}_{ti}",
+                                                     width="stretch"):
+                                            st.session_state[idx_key] = ti
+                                            st.rerun()
+
+                        elif img_path:
+                            st.image(str(img_path), caption=f"{pn} - {pname_ex}", width="stretch")
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
@@ -902,4 +1032,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
