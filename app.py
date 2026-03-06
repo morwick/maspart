@@ -454,9 +454,37 @@ class ExcelSearchApp:
         return []
 
     @staticmethod
-    def render_zoomable_image(img_bytes: bytes, caption: str = ""):
-        """Render gambar dengan zoom in/out di dalam iframe Streamlit."""
+    def render_zoomable_image(img_bytes: bytes, caption: str = "", zoom_key: str = "zoom_default"):
+        """Tampilkan gambar dengan kontrol zoom menggunakan st.image + CSS transform."""
         import base64
+
+        zk = f"zoom_scale_{zoom_key}"
+        if zk not in st.session_state:
+            st.session_state[zk] = 100  # persen
+
+        scale = st.session_state[zk]
+
+        # Tombol zoom
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
+        with c1:
+            if st.button("🔍＋", key=f"zi_{zoom_key}", help="Zoom In", use_container_width=True):
+                st.session_state[zk] = min(scale + 25, 300)
+                st.rerun()
+        with c2:
+            if st.button("🔍－", key=f"zo_{zoom_key}", help="Zoom Out", use_container_width=True):
+                st.session_state[zk] = max(scale - 25, 25)
+                st.rerun()
+        with c3:
+            if st.button("⟳", key=f"zr_{zoom_key}", help="Reset zoom", use_container_width=True):
+                st.session_state[zk] = 100
+                st.rerun()
+        with c4:
+            st.markdown(
+                f"<div style='padding:6px 0;color:#555;font-size:.85rem;'>Zoom: <b>{st.session_state[zk]}%</b></div>",
+                unsafe_allow_html=True
+            )
+
+        # Render gambar dengan CSS transform scale
         b64 = base64.b64encode(img_bytes).decode()
         sig = img_bytes[:4]
         if sig[:2] == b'\xff\xd8':
@@ -467,181 +495,22 @@ class ExcelSearchApp:
             mime = "image/gif"
         else:
             mime = "image/jpeg"
-        safe_caption = caption.replace("'", "\\'").replace('"', "&quot;")
-        html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:transparent; font-family:sans-serif; overflow:hidden; }}
 
-  /* ── Normal view ── */
-  #normal-view {{
-    display:flex; flex-direction:column; align-items:center; gap:6px; padding:6px 0;
-  }}
-  #thumb {{
-    max-width:100%; max-height:300px; object-fit:contain;
-    border-radius:8px; cursor:zoom-in;
-    box-shadow:0 2px 10px rgba(0,0,0,.18);
-    transition:box-shadow .2s;
-  }}
-  #thumb:hover {{ box-shadow:0 4px 18px rgba(0,0,0,.32); }}
-  .caption {{ font-size:.78rem; color:#555; text-align:center; padding:0 8px; }}
-  .hint {{ font-size:.72rem; color:#aaa; text-align:center; }}
-
-  /* ── Zoom view (fullscreen inside iframe) ── */
-  #zoom-view {{
-    display:none; position:fixed; inset:0;
-    background:#111;
-    flex-direction:column; align-items:center; justify-content:center;
-    z-index:9999;
-  }}
-  #zoom-view.open {{ display:flex; }}
-  #zoom-canvas {{
-    position:relative; overflow:hidden;
-    width:100%; flex:1;
-    display:flex; align-items:center; justify-content:center;
-  }}
-  #zoom-img {{
-    max-width:95%; max-height:100%;
-    object-fit:contain;
-    transform-origin:center center;
-    cursor:grab; user-select:none;
-    transition:transform .1s ease;
-    border-radius:4px;
-  }}
-  #zoom-img.grabbing {{ cursor:grabbing; }}
-
-  /* Controls bar */
-  #ctrl-bar {{
-    display:flex; align-items:center; gap:8px;
-    padding:8px 14px; background:#1e1e1e;
-    width:100%; justify-content:center; flex-wrap:wrap;
-  }}
-  .zbtn {{
-    background:#333; color:#fff; border:1px solid #555;
-    border-radius:6px; padding:5px 16px; font-size:1rem;
-    cursor:pointer; transition:background .15s;
-  }}
-  .zbtn:hover {{ background:#555; }}
-  .zbtn.close-btn {{ background:#c0392b; border-color:#c0392b; }}
-  .zbtn.close-btn:hover {{ background:#e74c3c; }}
-  #zoom-pct {{ color:#ccc; font-size:.88rem; min-width:48px; text-align:center; }}
-  #zoom-caption {{ color:#888; font-size:.76rem; text-align:center; flex-basis:100%; margin-top:2px; }}
-</style>
-</head>
-<body>
-
-<!-- Normal thumbnail view -->
-<div id="normal-view">
-  <img id="thumb" src="data:{mime};base64,{b64}" onclick="openZoom()" title="Klik untuk zoom"/>
-  <div class="caption">{safe_caption}</div>
-  <div class="hint">🔍 Klik gambar untuk zoom</div>
+        cur_scale = st.session_state[zk]
+        safe_caption = caption.replace("<", "&lt;").replace(">", "&gt;")
+        img_html = f"""
+<div style="overflow:auto; width:100%; text-align:center; padding:4px 0;">
+  <img src="data:{mime};base64,{b64}"
+       style="width:{cur_scale}%; max-width:none;
+              transform-origin:top center;
+              border-radius:8px;
+              box-shadow:0 2px 12px rgba(0,0,0,.18);
+              transition:width .2s ease;"
+       title="{safe_caption}" />
+  <div style="font-size:.78rem;color:#666;margin-top:4px;">{safe_caption}</div>
 </div>
-
-<!-- Zoom fullscreen view (inside iframe) -->
-<div id="zoom-view">
-  <div id="zoom-canvas">
-    <img id="zoom-img" src="data:{mime};base64,{b64}" draggable="false"/>
-  </div>
-  <div id="ctrl-bar">
-    <button class="zbtn" onclick="zm(-0.3)">－</button>
-    <span id="zoom-pct">100%</span>
-    <button class="zbtn" onclick="zm(+0.3)">＋</button>
-    <button class="zbtn" onclick="resetZ()">⟳ Reset</button>
-    <button class="zbtn close-btn" onclick="closeZoom()">✕ Tutup</button>
-    <div id="zoom-caption">{safe_caption}</div>
-  </div>
-</div>
-
-<script>
-(function() {{
-  var sc = 1, tx = 0, ty = 0;
-  var drag = false, sx = 0, sy = 0;
-  var mi = document.getElementById('zoom-img');
-  var zv = document.getElementById('zoom-view');
-  var nv = document.getElementById('normal-view');
-
-  function ap() {{
-    mi.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + sc + ')';
-    document.getElementById('zoom-pct').textContent = Math.round(sc * 100) + '%';
-  }}
-
-  window.openZoom = function() {{
-    sc = 1; tx = 0; ty = 0; ap();
-    nv.style.display = 'none';
-    zv.classList.add('open');
-    // Expand iframe height via parent postMessage
-    window.parent.postMessage({{ type: 'streamlit:setFrameHeight', height: window.screen.height }}, '*');
-  }};
-
-  window.closeZoom = function() {{
-    zv.classList.remove('open');
-    nv.style.display = 'flex';
-    window.parent.postMessage({{ type: 'streamlit:setFrameHeight', height: 380 }}, '*');
-  }};
-
-  window.zm = function(d) {{
-    sc = Math.min(Math.max(sc + d, 0.2), 8);
-    ap();
-  }};
-
-  window.resetZ = function() {{
-    sc = 1; tx = 0; ty = 0; ap();
-  }};
-
-  // Scroll wheel zoom
-  document.getElementById('zoom-canvas').addEventListener('wheel', function(e) {{
-    e.preventDefault();
-    zm(e.deltaY < 0 ? 0.15 : -0.15);
-  }}, {{ passive: false }});
-
-  // Drag to pan
-  mi.addEventListener('mousedown', function(e) {{
-    drag = true; sx = e.clientX - tx; sy = e.clientY - ty;
-    mi.classList.add('grabbing');
-    e.preventDefault();
-  }});
-  document.addEventListener('mousemove', function(e) {{
-    if (!drag) return;
-    tx = e.clientX - sx; ty = e.clientY - sy; ap();
-  }});
-  document.addEventListener('mouseup', function() {{
-    drag = false; mi.classList.remove('grabbing');
-  }});
-
-  // Keyboard shortcuts
-  document.addEventListener('keydown', function(e) {{
-    if (!zv.classList.contains('open')) return;
-    if (e.key === 'Escape') closeZoom();
-    if (e.key === '+' || e.key === '=') zm(0.25);
-    if (e.key === '-') zm(-0.25);
-    if (e.key === '0') resetZ();
-  }});
-
-  // Pinch to zoom (touch)
-  var ld = null;
-  document.addEventListener('touchstart', function(e) {{
-    if (e.touches.length === 2)
-      ld = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                      e.touches[0].clientY - e.touches[1].clientY);
-  }}, {{ passive: true }});
-  document.addEventListener('touchmove', function(e) {{
-    if (e.touches.length === 2 && ld !== null) {{
-      var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                         e.touches[0].clientY - e.touches[1].clientY);
-      zm((d - ld) * 0.008); ld = d;
-    }}
-  }}, {{ passive: true }});
-  document.addEventListener('touchend', function() {{ ld = null; }});
-}})();
-</script>
-</body>
-</html>
 """
-        st.components.v1.html(html, height=380, scrolling=False)
+        st.markdown(img_html, unsafe_allow_html=True)
 
     @staticmethod
     def fetch_image_bytes(url: str):
@@ -1180,7 +1049,8 @@ class ExcelSearchApp:
                                     with col_img:
                                         ExcelSearchApp.render_zoomable_image(
                                             img_bytes,
-                                            caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})"
+                                            caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
+                                            zoom_key=f"{pn}_{current_idx}"
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
@@ -1205,7 +1075,7 @@ class ExcelSearchApp:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
                                 img_data = img_path.read_bytes()
-                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex}")
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex}", zoom_key=f"{pn}_local")
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
@@ -1262,7 +1132,8 @@ class ExcelSearchApp:
                                     with col_img:
                                         ExcelSearchApp.render_zoomable_image(
                                             img_bytes,
-                                            caption=f"{search_term}  (Gambar {current_idx + 1}/{total})"
+                                            caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
+                                            zoom_key=f"nf_{search_term}_{current_idx}"
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
@@ -1286,7 +1157,7 @@ class ExcelSearchApp:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
                                 img_data = img_path.read_bytes()
-                                ExcelSearchApp.render_zoomable_image(img_data, caption=search_term)
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=search_term, zoom_key=f"nf_{search_term}_local")
 
     def run(self):
         self.display_dashboard()
