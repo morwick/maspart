@@ -17,6 +17,8 @@ import re
 import io
 import json
 import requests
+import numpy as np
+from PIL import Image
 
 warnings.filterwarnings('ignore')
 
@@ -75,6 +77,184 @@ DATA_FOLDER     = Path("data")
 CACHE_FOLDER    = Path(".cache")
 IMAGES_FOLDER   = Path("images")
 IMAGES_JSON     = Path("images") / "image_links.json"
+IMAGE_INDEX_PATH = Path(".cache") / "image_search_index.pkl"
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  IMAGE SEARCH ENGINE  — ResNet feature extraction + cosine sim
+# ══════════════════════════════════════════════════════════════════
+class ImageSearchEngine:
+    """
+    Build dan query image similarity index menggunakan ResNet18.
+    Index disimpan ke disk agar tidak perlu rebuild setiap startup.
+    """
+
+    IMG_SIZE   = 224
+    BATCH_SIZE = 16          # download paralel
+    TOP_N      = 5
+
+    # ── Singleton model (load sekali per proses) ──────────────────
+    _model       = None
+    _transform   = None
+    _model_ready = False
+
+    @classmethod
+    def _load_model(cls):
+        if cls._model_ready:
+            return True
+        try:
+            import torch
+            import torchvision.models as models
+            import torchvision.transforms as T
+            model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+            model.fc = torch.nn.Identity()   # buang head classifier
+            model.eval()
+            cls._model = model
+            cls._transform = T.Compose([
+                T.Resize((cls.IMG_SIZE, cls.IMG_SIZE)),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]),
+            ])
+            cls._model_ready = True
+            return True
+        except Exception as e:
+            st.error(f"❌ Gagal memuat model ResNet: {e}\n\nPastikan `torch` dan `torchvision` sudah terinstall.")
+            return False
+
+    @classmethod
+    def _extract_features(cls, pil_img: "Image.Image"):
+        """Return feature vector numpy (512,) atau None."""
+        try:
+            import torch
+            tensor = cls._transform(pil_img.convert("RGB")).unsqueeze(0)
+            with torch.no_grad():
+                vec = cls._model(tensor).squeeze().numpy()
+            # L2 normalize
+            norm = np.linalg.norm(vec)
+            return vec / norm if norm > 0 else vec
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fetch_pil(url: str):
+        """Download URL → PIL Image atau None."""
+        try:
+            resp = requests.get(url, timeout=15,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and len(resp.content) > 500:
+                return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception:
+            pass
+        return None
+
+    # ── Build index ───────────────────────────────────────────────
+    @classmethod
+    def build_index(cls, image_links: dict, progress_bar=None, status_text=None):
+        """
+        image_links: {part_number: [url, ...]}
+        Simpan index ke IMAGE_INDEX_PATH.
+        Return (index_list, skipped_count)
+        """
+        if not cls._load_model():
+            return [], 0
+
+        # Flatten: list of (part_number, url)
+        all_pairs = []
+        for pn, urls in image_links.items():
+            for url in urls:
+                all_pairs.append((pn, url))
+
+        total   = len(all_pairs)
+        index   = []          # list of {"pn": pn, "url": url, "vec": np.array}
+        skipped = 0
+        done    = 0
+
+        def process_pair(pair):
+            pn, url = pair
+            img = cls._fetch_pil(url)
+            if img is None:
+                return None
+            vec = cls._extract_features(img)
+            if vec is None:
+                return None
+            return {"pn": pn, "url": url, "vec": vec}
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(process_pair, p): p for p in all_pairs}
+            for future in as_completed(futures):
+                done += 1
+                if progress_bar:
+                    progress_bar.progress(done / total)
+                if status_text:
+                    status_text.text(f"⏳ Memproses gambar {done}/{total}…")
+                result = future.result()
+                if result:
+                    index.append(result)
+                else:
+                    skipped += 1
+
+        # Simpan ke disk
+        IMAGE_INDEX_PATH.parent.mkdir(exist_ok=True)
+        meta = {
+            "index":      index,
+            "total_urls": total,
+            "skipped":    skipped,
+            "built_at":   datetime.now().isoformat(),
+            "json_keys":  sorted(image_links.keys()),
+        }
+        with open(IMAGE_INDEX_PATH, "wb") as f:
+            pickle.dump(meta, f)
+
+        return index, skipped
+
+    @classmethod
+    def load_index(cls):
+        """Load index dari disk. Return (index_list, meta_dict) atau (None, None)."""
+        if not IMAGE_INDEX_PATH.exists():
+            return None, None
+        try:
+            with open(IMAGE_INDEX_PATH, "rb") as f:
+                meta = pickle.load(f)
+            return meta.get("index", []), meta
+        except Exception:
+            return None, None
+
+    @classmethod
+    def search(cls, query_img: "Image.Image", index: list, top_n: int = 5):
+        """
+        Cari gambar paling mirip.
+        Return list of {"pn": .., "url": .., "score": float} diurutkan desc.
+        """
+        if not cls._load_model():
+            return []
+        q_vec = cls._extract_features(query_img)
+        if q_vec is None:
+            return []
+
+        scored = []
+        for item in index:
+            score = float(np.dot(q_vec, item["vec"]))
+            scored.append({"pn": item["pn"], "url": item["url"], "score": score})
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        # De-duplikasi per part number (ambil skor tertinggi per PN)
+        seen_pn = {}
+        deduped = []
+        for s in scored:
+            pn = s["pn"]
+            if pn not in seen_pn:
+                seen_pn[pn] = s
+                deduped.append(s)
+            else:
+                if s["score"] > seen_pn[pn]["score"]:
+                    seen_pn[pn] = s
+
+        # Re-sort setelah dedup
+        deduped = sorted(seen_pn.values(), key=lambda x: x["score"], reverse=True)
+        return deduped[:top_n]
 
 
 class LoginManager:
@@ -454,6 +634,65 @@ class ExcelSearchApp:
         return []
 
     @staticmethod
+    def render_zoomable_image(img_bytes: bytes, caption: str = "", zoom_key: str = "zoom_default"):
+        """Tampilkan gambar dengan kontrol zoom menggunakan st.image + CSS transform."""
+        import base64
+
+        zk = f"zoom_scale_{zoom_key}"
+        if zk not in st.session_state:
+            st.session_state[zk] = 100  # persen
+
+        scale = st.session_state[zk]
+
+        # Tombol zoom
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
+        with c1:
+            if st.button("🔍＋", key=f"zi_{zoom_key}", help="Zoom In", use_container_width=True):
+                st.session_state[zk] = min(scale + 25, 300)
+                st.rerun()
+        with c2:
+            if st.button("🔍－", key=f"zo_{zoom_key}", help="Zoom Out", use_container_width=True):
+                st.session_state[zk] = max(scale - 25, 25)
+                st.rerun()
+        with c3:
+            if st.button("⟳", key=f"zr_{zoom_key}", help="Reset zoom", use_container_width=True):
+                st.session_state[zk] = 100
+                st.rerun()
+        with c4:
+            st.markdown(
+                f"<div style='padding:6px 0;color:#555;font-size:.85rem;'>Zoom: <b>{st.session_state[zk]}%</b></div>",
+                unsafe_allow_html=True
+            )
+
+        # Render gambar dengan CSS transform scale
+        b64 = base64.b64encode(img_bytes).decode()
+        sig = img_bytes[:4]
+        if sig[:2] == b'\xff\xd8':
+            mime = "image/jpeg"
+        elif sig[:4] == b'\x89PNG':
+            mime = "image/png"
+        elif sig[:3] == b'GIF':
+            mime = "image/gif"
+        else:
+            mime = "image/jpeg"
+
+        cur_scale = st.session_state[zk]
+        safe_caption = caption.replace("<", "&lt;").replace(">", "&gt;")
+        img_html = f"""
+<div style="overflow:auto; width:100%; text-align:center; padding:4px 0;">
+  <img src="data:{mime};base64,{b64}"
+       style="width:{cur_scale}%; max-width:none;
+              transform-origin:top center;
+              border-radius:8px;
+              box-shadow:0 2px 12px rgba(0,0,0,.18);
+              transition:width .2s ease;"
+       title="{safe_caption}" />
+  <div style="font-size:.78rem;color:#666;margin-top:4px;">{safe_caption}</div>
+</div>
+"""
+        st.markdown(img_html, unsafe_allow_html=True)
+
+    @staticmethod
     def fetch_image_bytes(url: str):
         """Fetch image from URL and return bytes."""
         try:
@@ -635,6 +874,181 @@ class ExcelSearchApp:
                     prog.empty(); txt.empty()
         except Exception as e:
             st.sidebar.error(f"Error auto-load: {e}")
+
+    # ── IMAGE SEARCH TAB ────────────────────────────────────────────
+    def render_image_search_tab(self):
+        st.markdown("### 🖼️ Cari Part by Gambar")
+        st.markdown(
+            "Upload foto produk, sistem akan mencari **5 part number paling mirip** "
+            "dari seluruh database gambar."
+        )
+
+        # ── 1. Pastikan image_links sudah di-load ──
+        if not hasattr(self, "image_links") or not self.image_links:
+            self._load_image_links()
+
+        if not self.image_links:
+            st.warning("⚠️ Tidak ada data gambar (image_links.json tidak ditemukan atau kosong).")
+            return
+
+        total_links = sum(len(v) for v in self.image_links.values())
+
+        # ── 2. Status index ──
+        index_data, index_meta = ImageSearchEngine.load_index()
+        index_ok = (index_data is not None and len(index_data) > 0)
+
+        col_stat, col_btn = st.columns([3, 1])
+        with col_stat:
+            if index_ok:
+                built_at = index_meta.get("built_at", "—")[:16].replace("T", " ")
+                st.success(
+                    f"✅ **Index siap** — {len(index_data):,} gambar terindeks "
+                    f"dari {len(self.image_links):,} part number "
+                    f"(dibangun: {built_at})"
+                )
+            else:
+                st.info(
+                    f"ℹ️ Index belum dibangun. Terdapat **{total_links:,} gambar** "
+                    f"dari **{len(self.image_links):,} part number** yang akan diproses.\n\n"
+                    f"Proses ini hanya perlu dilakukan **sekali** (±5–20 menit tergantung koneksi)."
+                )
+        with col_btn:
+            rebuild_label = "🔄 Rebuild Index" if index_ok else "🚀 Bangun Index"
+            do_build = st.button(rebuild_label, type="primary" if not index_ok else "secondary",
+                                 width="stretch", key="img_build_btn")
+
+        # ── 3. Build index ──
+        if do_build:
+            st.warning("⚙️ Membangun index… jangan tutup halaman ini.")
+            prog = st.progress(0)
+            txt  = st.empty()
+            new_index, skipped = ImageSearchEngine.build_index(
+                self.image_links, progress_bar=prog, status_text=txt
+            )
+            prog.empty(); txt.empty()
+            if new_index:
+                st.success(f"✅ Index selesai! {len(new_index):,} gambar terindeks, {skipped:,} gagal/dilewati.")
+                st.rerun()
+            else:
+                st.error("❌ Gagal membangun index. Periksa koneksi dan pastikan torch terinstall.")
+            return
+
+        if not index_ok:
+            st.markdown("---")
+            st.markdown("👆 Klik **Bangun Index** terlebih dahulu sebelum bisa mencari.")
+            return
+
+        # ── 4. Upload gambar query ──
+        st.markdown("---")
+        uploaded_img = st.file_uploader(
+            "📷 Upload foto produk yang ingin dicari:",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="img_search_uploader"
+        )
+
+        if uploaded_img is None:
+            return
+
+        try:
+            query_pil = Image.open(io.BytesIO(uploaded_img.read())).convert("RGB")
+        except Exception as e:
+            st.error(f"Gagal membaca gambar: {e}")
+            return
+
+        # Tampilkan gambar query
+        col_q, _ = st.columns([1, 2])
+        with col_q:
+            st.image(query_pil, caption="Gambar yang dicari", use_container_width=True)
+
+        # ── 5. Search ──
+        with st.spinner("🔍 Mencari gambar serupa…"):
+            results = ImageSearchEngine.search(query_pil, index_data, top_n=5)
+
+        if not results:
+            st.warning("Tidak ditemukan hasil yang cocok.")
+            return
+
+        st.markdown(f"### 🎯 Top {len(results)} Hasil Paling Mirip")
+
+        for rank, res in enumerate(results, start=1):
+            pn      = res["pn"]
+            url     = res["url"]
+            score   = res["score"]
+            pct     = max(0, min(100, int(score * 100)))
+
+            # Warna badge similarity
+            if pct >= 80:
+                badge_color = "#2E7D32"; label = "Sangat Mirip"
+            elif pct >= 60:
+                badge_color = "#1565C0"; label = "Mirip"
+            elif pct >= 40:
+                badge_color = "#E65100"; label = "Agak Mirip"
+            else:
+                badge_color = "#757575"; label = "Kurang Mirip"
+
+            with st.expander(
+                f"{'🥇' if rank==1 else '🥈' if rank==2 else '🥉' if rank==3 else f'#{rank}'}  "
+                f"**{pn}**  —  {label} ({pct}%)",
+                expanded=(rank == 1)
+            ):
+                col_img, col_info = st.columns([2, 1])
+
+                with col_img:
+                    img_bytes, err = ExcelSearchApp.fetch_image_bytes(url)
+                    if img_bytes:
+                        ExcelSearchApp.render_zoomable_image(
+                            img_bytes,
+                            caption=f"{pn}",
+                            zoom_key=f"imgsearch_{rank}_{pn}"
+                        )
+                    else:
+                        st.warning(f"Gagal memuat gambar: {err}")
+                        st.caption(url)
+
+                with col_info:
+                    st.markdown(
+                        f"""
+<div style="background:#F5F5F5;border-radius:10px;padding:16px;margin-top:8px;">
+  <div style="font-size:1.1rem;font-weight:700;color:#1E3A5F;margin-bottom:8px;">
+    📦 {pn}
+  </div>
+  <div style="margin-bottom:12px;">
+    <span style="background:{badge_color};color:#fff;border-radius:20px;
+                 padding:3px 12px;font-size:0.85rem;font-weight:600;">
+      {label}
+    </span>
+  </div>
+  <div style="margin-bottom:6px;">
+    <b>Similarity Score</b><br>
+    <div style="background:#E0E0E0;border-radius:8px;height:14px;margin-top:4px;">
+      <div style="background:{badge_color};width:{pct}%;height:100%;
+                  border-radius:8px;transition:width .3s;"></div>
+    </div>
+    <small style="color:#666;">{pct}%</small>
+  </div>
+  <div style="margin-top:10px;font-size:0.8rem;color:#555;">
+    <b>Rank:</b> #{rank} dari {len(results)}
+  </div>
+</div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    # Tampilkan semua gambar part ini (thumbnail strip)
+                    all_links_for_pn = self.get_image_links(pn)
+                    if len(all_links_for_pn) > 1:
+                        st.markdown(f"**Semua foto ({len(all_links_for_pn)}):**")
+                        thumb_cols = st.columns(min(len(all_links_for_pn), 4))
+                        for ti, (tc, lnk) in enumerate(zip(thumb_cols, all_links_for_pn)):
+                            with tc:
+                                idx_key = f"isearch_idx_{rank}_{pn}"
+                                if idx_key not in st.session_state:
+                                    st.session_state[idx_key] = 0
+                                lbl = f"{'✅' if ti == st.session_state[idx_key] else '🔲'} {ti+1}"
+                                if st.button(lbl, key=f"isearch_thumb_{rank}_{pn}_{ti}",
+                                             use_container_width=True):
+                                    st.session_state[idx_key] = ti
+                                    st.rerun()
 
     # ── BATCH DOWNLOAD TAB ──────────────────────────────────────────────────
     def render_batch_download_tab(self):
@@ -844,6 +1258,7 @@ class ExcelSearchApp:
 3. **Stok:** data/stok/stok.xlsx (Kol A=PN, Kol D=Stok)
 4. **Threshold (Admin):** data/stok/threshold.xlsx
 5. **Batch Download:** Upload Excel berisi PN di Kol A
+6. **Cari by Gambar:** Upload foto → sistem cari 5 part paling mirip
                 """)
 
         # ── TABS ──
@@ -851,12 +1266,13 @@ class ExcelSearchApp:
         st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
 
         if role == "admin":
-            tab1, tab2, tab3, tab4 = st.tabs([
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
-                "⚠️ Threshold", "📥 Batch Download"])
+                "⚠️ Threshold", "📥 Batch Download", "🖼️ Cari by Gambar"])
         else:
-            tab1, tab2, tab4 = st.tabs([
-                "🔢 Search Part Number", "📝 Search Part Name", "📥 Batch Download"])
+            tab1, tab2, tab4, tab5 = st.tabs([
+                "🔢 Search Part Number", "📝 Search Part Name",
+                "📥 Batch Download", "🖼️ Cari by Gambar"])
             tab3 = None
 
         with tab1:
@@ -907,6 +1323,9 @@ class ExcelSearchApp:
 
         with tab4:
             self.render_batch_download_tab()
+
+        with tab5:
+            self.render_image_search_tab()
 
         st.markdown("</div>", unsafe_allow_html=True)
         self.display_search_results()
@@ -988,10 +1407,10 @@ class ExcelSearchApp:
                                 try:
                                     _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
-                                        st.image(
+                                        ExcelSearchApp.render_zoomable_image(
                                             img_bytes,
                                             caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
-                                            use_container_width=True
+                                            zoom_key=f"{pn}_{current_idx}"
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
@@ -1015,7 +1434,8 @@ class ExcelSearchApp:
                         elif img_path:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                st.image(str(img_path), caption=f"{pn} - {pname_ex}", use_container_width=True)
+                                img_data = img_path.read_bytes()
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex}", zoom_key=f"{pn}_local")
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
@@ -1070,10 +1490,10 @@ class ExcelSearchApp:
                                 try:
                                     _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
-                                        st.image(
+                                        ExcelSearchApp.render_zoomable_image(
                                             img_bytes,
                                             caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
-                                            use_container_width=True
+                                            zoom_key=f"nf_{search_term}_{current_idx}"
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
@@ -1096,7 +1516,8 @@ class ExcelSearchApp:
                         elif img_path:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                st.image(str(img_path), caption=search_term, use_container_width=True)
+                                img_data = img_path.read_bytes()
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=search_term, zoom_key=f"nf_{search_term}_local")
 
     def run(self):
         self.display_dashboard()
