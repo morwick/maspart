@@ -455,7 +455,7 @@ class ExcelSearchApp:
 
     @staticmethod
     def render_zoomable_image(img_bytes: bytes, caption: str = ""):
-        """Render gambar dengan modal fullscreen + zoom in/out via scroll & tombol."""
+        """Render gambar dengan zoom in/out di dalam iframe Streamlit."""
         import base64
         b64 = base64.b64encode(img_bytes).decode()
         sig = img_bytes[:4]
@@ -469,94 +469,179 @@ class ExcelSearchApp:
             mime = "image/jpeg"
         safe_caption = caption.replace("'", "\\'").replace('"', "&quot;")
         html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
 <style>
-  .zimg-wrap{{display:flex;flex-direction:column;align-items:center;gap:6px}}
-  .zimg-thumb{{max-width:100%;max-height:320px;object-fit:contain;border-radius:8px;
-    cursor:zoom-in;box-shadow:0 2px 10px rgba(0,0,0,.15);transition:box-shadow .2s}}
-  .zimg-thumb:hover{{box-shadow:0 4px 18px rgba(0,0,0,.28)}}
-  .zimg-caption{{font-size:.8rem;color:#555;text-align:center}}
-  .zimg-hint{{font-size:.73rem;color:#999;text-align:center}}
-  .zimg-overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);
-    z-index:99999;flex-direction:column;align-items:center;justify-content:center}}
-  .zimg-overlay.active{{display:flex}}
-  .zimg-modal-img{{max-width:90vw;max-height:78vh;object-fit:contain;
-    transform-origin:center center;transition:transform .12s ease;
-    cursor:grab;user-select:none;border-radius:4px}}
-  .zimg-modal-img.grabbing{{cursor:grabbing}}
-  .zimg-controls{{display:flex;gap:10px;margin-top:14px;align-items:center}}
-  .zimg-btn{{background:rgba(255,255,255,.15);color:#fff;
-    border:1px solid rgba(255,255,255,.3);border-radius:6px;
-    padding:6px 18px;font-size:1.1rem;cursor:pointer;transition:background .15s}}
-  .zimg-btn:hover{{background:rgba(255,255,255,.3)}}
-  .zlevel{{color:#ddd;font-size:.9rem;min-width:52px;text-align:center}}
-  .zimg-close{{position:absolute;top:14px;right:22px;color:#fff;font-size:2rem;
-    cursor:pointer;background:none;border:none;line-height:1;opacity:.8}}
-  .zimg-close:hover{{opacity:1}}
-  .zimg-modal-cap{{color:#bbb;font-size:.8rem;margin-top:8px;text-align:center}}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:transparent; font-family:sans-serif; overflow:hidden; }}
+
+  /* ── Normal view ── */
+  #normal-view {{
+    display:flex; flex-direction:column; align-items:center; gap:6px; padding:6px 0;
+  }}
+  #thumb {{
+    max-width:100%; max-height:300px; object-fit:contain;
+    border-radius:8px; cursor:zoom-in;
+    box-shadow:0 2px 10px rgba(0,0,0,.18);
+    transition:box-shadow .2s;
+  }}
+  #thumb:hover {{ box-shadow:0 4px 18px rgba(0,0,0,.32); }}
+  .caption {{ font-size:.78rem; color:#555; text-align:center; padding:0 8px; }}
+  .hint {{ font-size:.72rem; color:#aaa; text-align:center; }}
+
+  /* ── Zoom view (fullscreen inside iframe) ── */
+  #zoom-view {{
+    display:none; position:fixed; inset:0;
+    background:#111;
+    flex-direction:column; align-items:center; justify-content:center;
+    z-index:9999;
+  }}
+  #zoom-view.open {{ display:flex; }}
+  #zoom-canvas {{
+    position:relative; overflow:hidden;
+    width:100%; flex:1;
+    display:flex; align-items:center; justify-content:center;
+  }}
+  #zoom-img {{
+    max-width:95%; max-height:100%;
+    object-fit:contain;
+    transform-origin:center center;
+    cursor:grab; user-select:none;
+    transition:transform .1s ease;
+    border-radius:4px;
+  }}
+  #zoom-img.grabbing {{ cursor:grabbing; }}
+
+  /* Controls bar */
+  #ctrl-bar {{
+    display:flex; align-items:center; gap:8px;
+    padding:8px 14px; background:#1e1e1e;
+    width:100%; justify-content:center; flex-wrap:wrap;
+  }}
+  .zbtn {{
+    background:#333; color:#fff; border:1px solid #555;
+    border-radius:6px; padding:5px 16px; font-size:1rem;
+    cursor:pointer; transition:background .15s;
+  }}
+  .zbtn:hover {{ background:#555; }}
+  .zbtn.close-btn {{ background:#c0392b; border-color:#c0392b; }}
+  .zbtn.close-btn:hover {{ background:#e74c3c; }}
+  #zoom-pct {{ color:#ccc; font-size:.88rem; min-width:48px; text-align:center; }}
+  #zoom-caption {{ color:#888; font-size:.76rem; text-align:center; flex-basis:100%; margin-top:2px; }}
 </style>
-<div class="zimg-wrap">
-  <img class="zimg-thumb" src="data:{mime};base64,{b64}"
-       onclick="openZoom(this)" title="Klik untuk fullscreen"/>
-  <div class="zimg-caption">{safe_caption}</div>
-  <div class="zimg-hint">🔍 Klik gambar untuk fullscreen · scroll/tombol untuk zoom</div>
+</head>
+<body>
+
+<!-- Normal thumbnail view -->
+<div id="normal-view">
+  <img id="thumb" src="data:{mime};base64,{b64}" onclick="openZoom()" title="Klik untuk zoom"/>
+  <div class="caption">{safe_caption}</div>
+  <div class="hint">🔍 Klik gambar untuk zoom</div>
 </div>
-<div class="zimg-overlay" id="zov" onclick="ovClick(event)">
-  <button class="zimg-close" onclick="closeZ()">✕</button>
-  <img class="zimg-modal-img" id="zmi" src="" draggable="false"/>
-  <div class="zimg-modal-cap" id="zmc"></div>
-  <div class="zimg-controls">
-    <button class="zimg-btn" onclick="zm(-0.25)">－</button>
-    <span class="zlevel" id="zlv">100%</span>
-    <button class="zimg-btn" onclick="zm(+0.25)">＋</button>
-    <button class="zimg-btn" onclick="resetZ()" title="Reset">⟳</button>
+
+<!-- Zoom fullscreen view (inside iframe) -->
+<div id="zoom-view">
+  <div id="zoom-canvas">
+    <img id="zoom-img" src="data:{mime};base64,{b64}" draggable="false"/>
+  </div>
+  <div id="ctrl-bar">
+    <button class="zbtn" onclick="zm(-0.3)">－</button>
+    <span id="zoom-pct">100%</span>
+    <button class="zbtn" onclick="zm(+0.3)">＋</button>
+    <button class="zbtn" onclick="resetZ()">⟳ Reset</button>
+    <button class="zbtn close-btn" onclick="closeZoom()">✕ Tutup</button>
+    <div id="zoom-caption">{safe_caption}</div>
   </div>
 </div>
+
 <script>
-(function(){{
-  var sc=1,drag=false,sx,sy,tx=0,ty=0,mi,ov;
-  function g(){{mi=document.getElementById('zmi');ov=document.getElementById('zov');}}
-  function ap(){{mi.style.transform='translate('+tx+'px,'+ty+'px) scale('+sc+')';
-    document.getElementById('zlv').textContent=Math.round(sc*100)+'%';}}
-  window.openZoom=function(el){{g();sc=1;tx=0;ty=0;mi.src=el.src;
-    document.getElementById('zmc').textContent="{safe_caption}";
-    ap();ov.classList.add('active');document.body.style.overflow='hidden';}};
-  window.closeZ=function(){{g();ov.classList.remove('active');document.body.style.overflow='';}};
-  window.ovClick=function(e){{if(e.target===ov)closeZ();}};
-  window.zm=function(d){{g();sc=Math.min(Math.max(sc+d,.2),8);ap();}};
-  window.resetZ=function(){{g();sc=1;tx=0;ty=0;ap();}};
-  document.addEventListener('wheel',function(e){{g();
-    if(!ov||!ov.classList.contains('active'))return;
-    e.preventDefault();zm(e.deltaY<0?.15:-.15);}},{{passive:false}});
-  document.addEventListener('mousedown',function(e){{g();
-    if(!ov||!ov.classList.contains('active'))return;
-    if(e.target!==mi)return;drag=true;sx=e.clientX-tx;sy=e.clientY-ty;
-    mi.classList.add('grabbing');}});
-  document.addEventListener('mousemove',function(e){{
-    if(!drag)return;tx=e.clientX-sx;ty=e.clientY-sy;ap();}});
-  document.addEventListener('mouseup',function(){{drag=false;if(mi)mi.classList.remove('grabbing');}});
-  document.addEventListener('keydown',function(e){{g();
-    if(!ov||!ov.classList.contains('active'))return;
-    if(e.key==='Escape')closeZ();
-    if(e.key==='+'||e.key==='=')zm(.25);
-    if(e.key==='-')zm(-.25);
-    if(e.key==='0')resetZ();}});
-  var ld=null;
-  document.addEventListener('touchstart',function(e){{
-    if(e.touches.length===2)ld=Math.hypot(
-      e.touches[0].clientX-e.touches[1].clientX,
-      e.touches[0].clientY-e.touches[1].clientY);}},{{passive:true}});
-  document.addEventListener('touchmove',function(e){{g();
-    if(!ov||!ov.classList.contains('active'))return;
-    if(e.touches.length===2){{var d=Math.hypot(
-      e.touches[0].clientX-e.touches[1].clientX,
-      e.touches[0].clientY-e.touches[1].clientY);
-      if(ld)zm((d-ld)*.008);ld=d;}}
-  }},{{passive:true}});
-  document.addEventListener('touchend',function(){{ld=null;}});
+(function() {{
+  var sc = 1, tx = 0, ty = 0;
+  var drag = false, sx = 0, sy = 0;
+  var mi = document.getElementById('zoom-img');
+  var zv = document.getElementById('zoom-view');
+  var nv = document.getElementById('normal-view');
+
+  function ap() {{
+    mi.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + sc + ')';
+    document.getElementById('zoom-pct').textContent = Math.round(sc * 100) + '%';
+  }}
+
+  window.openZoom = function() {{
+    sc = 1; tx = 0; ty = 0; ap();
+    nv.style.display = 'none';
+    zv.classList.add('open');
+    // Expand iframe height via parent postMessage
+    window.parent.postMessage({{ type: 'streamlit:setFrameHeight', height: window.screen.height }}, '*');
+  }};
+
+  window.closeZoom = function() {{
+    zv.classList.remove('open');
+    nv.style.display = 'flex';
+    window.parent.postMessage({{ type: 'streamlit:setFrameHeight', height: 380 }}, '*');
+  }};
+
+  window.zm = function(d) {{
+    sc = Math.min(Math.max(sc + d, 0.2), 8);
+    ap();
+  }};
+
+  window.resetZ = function() {{
+    sc = 1; tx = 0; ty = 0; ap();
+  }};
+
+  // Scroll wheel zoom
+  document.getElementById('zoom-canvas').addEventListener('wheel', function(e) {{
+    e.preventDefault();
+    zm(e.deltaY < 0 ? 0.15 : -0.15);
+  }}, {{ passive: false }});
+
+  // Drag to pan
+  mi.addEventListener('mousedown', function(e) {{
+    drag = true; sx = e.clientX - tx; sy = e.clientY - ty;
+    mi.classList.add('grabbing');
+    e.preventDefault();
+  }});
+  document.addEventListener('mousemove', function(e) {{
+    if (!drag) return;
+    tx = e.clientX - sx; ty = e.clientY - sy; ap();
+  }});
+  document.addEventListener('mouseup', function() {{
+    drag = false; mi.classList.remove('grabbing');
+  }});
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', function(e) {{
+    if (!zv.classList.contains('open')) return;
+    if (e.key === 'Escape') closeZoom();
+    if (e.key === '+' || e.key === '=') zm(0.25);
+    if (e.key === '-') zm(-0.25);
+    if (e.key === '0') resetZ();
+  }});
+
+  // Pinch to zoom (touch)
+  var ld = null;
+  document.addEventListener('touchstart', function(e) {{
+    if (e.touches.length === 2)
+      ld = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                      e.touches[0].clientY - e.touches[1].clientY);
+  }}, {{ passive: true }});
+  document.addEventListener('touchmove', function(e) {{
+    if (e.touches.length === 2 && ld !== null) {{
+      var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                         e.touches[0].clientY - e.touches[1].clientY);
+      zm((d - ld) * 0.008); ld = d;
+    }}
+  }}, {{ passive: true }});
+  document.addEventListener('touchend', function() {{ ld = null; }});
 }})();
 </script>
+</body>
+</html>
 """
-        st.components.v1.html(html, height=420, scrolling=False)
+        st.components.v1.html(html, height=380, scrolling=False)
 
     @staticmethod
     def fetch_image_bytes(url: str):
