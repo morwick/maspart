@@ -986,7 +986,7 @@ class ExcelSearchApp:
                                 img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
                             if img_bytes:
                                 try:
-                                    col_img, col_empty = st.columns([1, 1])
+                                    _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
                                         st.image(
                                             img_bytes,
@@ -1013,7 +1013,7 @@ class ExcelSearchApp:
                                             st.rerun()
 
                         elif img_path:
-                            col_img, col_empty = st.columns([1, 1])
+                            _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
                                 st.image(str(img_path), caption=f"{pn} - {pname_ex}", use_container_width=True)
                         else:
@@ -1068,7 +1068,7 @@ class ExcelSearchApp:
                                 img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
                             if img_bytes:
                                 try:
-                                    col_img, col_empty = st.columns([1, 1])
+                                    _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
                                         st.image(
                                             img_bytes,
@@ -1094,7 +1094,7 @@ class ExcelSearchApp:
                                             st.rerun()
 
                         elif img_path:
-                            col_img, col_empty = st.columns([1, 1])
+                            _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
                                 st.image(str(img_path), caption=search_term, use_container_width=True)
 
