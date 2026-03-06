@@ -1015,7 +1015,80 @@ class ExcelSearchApp:
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
-            st.warning(f"❌ Tidak ditemukan hasil untuk '{st.session_state.search_term}'")
+            search_term = st.session_state.search_term
+            st.warning(f"❌ Tidak ditemukan hasil untuk '{search_term}'")
+
+            # Tetap tampilkan gambar part jika tersedia, meskipun tidak ditemukan di Excel
+            if st.session_state.get("search_type") == "Part Number":
+                if not hasattr(self, 'image_links') or self.image_links is None:
+                    self._load_image_links()
+
+                img_links = self.get_image_links(search_term)
+                img_path  = self.get_image_path(search_term)
+                if img_path and not img_path.exists():
+                    img_path = None
+
+                if img_links or img_path:
+                    st.markdown("### 🖼️ Gambar Part")
+                    with st.expander(f"🖼️ {search_term}", expanded=True):
+                        if img_links:
+                            idx_key = f"img_idx_{search_term}"
+                            if idx_key not in st.session_state:
+                                st.session_state[idx_key] = 0
+
+                            total       = len(img_links)
+                            current_idx = st.session_state[idx_key]
+
+                            if total > 1:
+                                col_prev, col_info, col_next = st.columns([1, 3, 1])
+                                with col_prev:
+                                    if st.button("◀ Prev", key=f"nf_prev_{search_term}",
+                                                 disabled=(current_idx == 0), width="stretch"):
+                                        st.session_state[idx_key] = max(0, current_idx - 1)
+                                        st.rerun()
+                                with col_info:
+                                    st.markdown(
+                                        f"<div style='text-align:center; padding:6px 0; "
+                                        f"font-weight:600; color:#1565C0;'>"
+                                        f"Gambar {current_idx + 1} / {total}</div>",
+                                        unsafe_allow_html=True
+                                    )
+                                with col_next:
+                                    if st.button("Next ▶", key=f"nf_next_{search_term}",
+                                                 disabled=(current_idx == total - 1), width="stretch"):
+                                        st.session_state[idx_key] = min(total - 1, current_idx + 1)
+                                        st.rerun()
+
+                            active_url = img_links[current_idx]
+                            with st.spinner("Memuat gambar..."):
+                                img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
+                            if img_bytes:
+                                try:
+                                    st.image(
+                                        img_bytes,
+                                        caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
+                                        width="stretch"
+                                    )
+                                except Exception as e:
+                                    st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
+                                    st.caption(f"URL: {active_url}")
+                            else:
+                                st.warning(f"⚠️ Gagal memuat gambar: {err}")
+                                st.caption(f"URL: {active_url}")
+
+                            if total > 1:
+                                st.markdown("**Pilih gambar:**")
+                                thumb_cols = st.columns(min(total, 5))
+                                for ti, (tc, lnk) in enumerate(zip(thumb_cols, img_links)):
+                                    with tc:
+                                        label = f"{'✅' if ti == current_idx else '🔲'} {ti+1}"
+                                        if st.button(label, key=f"nf_thumb_{search_term}_{ti}",
+                                                     width="stretch"):
+                                            st.session_state[idx_key] = ti
+                                            st.rerun()
+
+                        elif img_path:
+                            st.image(str(img_path), caption=search_term, width="stretch")
 
     def run(self):
         self.display_dashboard()
