@@ -980,17 +980,19 @@ class ExcelSearchApp:
                                         st.session_state[idx_key] = min(total - 1, current_idx + 1)
                                         st.rerun()
 
-                            # Tampilkan gambar aktif (fetch via requests agar HTTP URL pun bisa tampil)
+                            # Tampilkan gambar aktif dalam kolom agar lebih kecil & rapi
                             active_url = img_links[current_idx]
                             with st.spinner("Memuat gambar..."):
                                 img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
                             if img_bytes:
                                 try:
-                                    st.image(
-                                        img_bytes,
-                                        caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
-                                        width="stretch"
-                                    )
+                                    col_img, col_empty = st.columns([1, 1])
+                                    with col_img:
+                                        st.image(
+                                            img_bytes,
+                                            caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
+                                            use_container_width=True
+                                        )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
                                     st.caption(f"URL: {active_url}")
@@ -1011,7 +1013,9 @@ class ExcelSearchApp:
                                             st.rerun()
 
                         elif img_path:
-                            st.image(str(img_path), caption=f"{pn} - {pname_ex}", width="stretch")
+                            col_img, col_empty = st.columns([1, 1])
+                            with col_img:
+                                st.image(str(img_path), caption=f"{pn} - {pname_ex}", use_container_width=True)
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
@@ -1064,11 +1068,13 @@ class ExcelSearchApp:
                                 img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
                             if img_bytes:
                                 try:
-                                    st.image(
-                                        img_bytes,
-                                        caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
-                                        width="stretch"
-                                    )
+                                    col_img, col_empty = st.columns([1, 1])
+                                    with col_img:
+                                        st.image(
+                                            img_bytes,
+                                            caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
+                                            use_container_width=True
+                                        )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
                                     st.caption(f"URL: {active_url}")
@@ -1088,7 +1094,9 @@ class ExcelSearchApp:
                                             st.rerun()
 
                         elif img_path:
-                            st.image(str(img_path), caption=search_term, width="stretch")
+                            col_img, col_empty = st.columns([1, 1])
+                            with col_img:
+                                st.image(str(img_path), caption=search_term, use_container_width=True)
 
     def run(self):
         self.display_dashboard()
