@@ -454,6 +454,111 @@ class ExcelSearchApp:
         return []
 
     @staticmethod
+    def render_zoomable_image(img_bytes: bytes, caption: str = ""):
+        """Render gambar dengan modal fullscreen + zoom in/out via scroll & tombol."""
+        import base64
+        b64 = base64.b64encode(img_bytes).decode()
+        sig = img_bytes[:4]
+        if sig[:2] == b'\xff\xd8':
+            mime = "image/jpeg"
+        elif sig[:4] == b'\x89PNG':
+            mime = "image/png"
+        elif sig[:3] == b'GIF':
+            mime = "image/gif"
+        else:
+            mime = "image/jpeg"
+        safe_caption = caption.replace("'", "\\'").replace('"', "&quot;")
+        html = f"""
+<style>
+  .zimg-wrap{{display:flex;flex-direction:column;align-items:center;gap:6px}}
+  .zimg-thumb{{max-width:100%;max-height:320px;object-fit:contain;border-radius:8px;
+    cursor:zoom-in;box-shadow:0 2px 10px rgba(0,0,0,.15);transition:box-shadow .2s}}
+  .zimg-thumb:hover{{box-shadow:0 4px 18px rgba(0,0,0,.28)}}
+  .zimg-caption{{font-size:.8rem;color:#555;text-align:center}}
+  .zimg-hint{{font-size:.73rem;color:#999;text-align:center}}
+  .zimg-overlay{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);
+    z-index:99999;flex-direction:column;align-items:center;justify-content:center}}
+  .zimg-overlay.active{{display:flex}}
+  .zimg-modal-img{{max-width:90vw;max-height:78vh;object-fit:contain;
+    transform-origin:center center;transition:transform .12s ease;
+    cursor:grab;user-select:none;border-radius:4px}}
+  .zimg-modal-img.grabbing{{cursor:grabbing}}
+  .zimg-controls{{display:flex;gap:10px;margin-top:14px;align-items:center}}
+  .zimg-btn{{background:rgba(255,255,255,.15);color:#fff;
+    border:1px solid rgba(255,255,255,.3);border-radius:6px;
+    padding:6px 18px;font-size:1.1rem;cursor:pointer;transition:background .15s}}
+  .zimg-btn:hover{{background:rgba(255,255,255,.3)}}
+  .zlevel{{color:#ddd;font-size:.9rem;min-width:52px;text-align:center}}
+  .zimg-close{{position:absolute;top:14px;right:22px;color:#fff;font-size:2rem;
+    cursor:pointer;background:none;border:none;line-height:1;opacity:.8}}
+  .zimg-close:hover{{opacity:1}}
+  .zimg-modal-cap{{color:#bbb;font-size:.8rem;margin-top:8px;text-align:center}}
+</style>
+<div class="zimg-wrap">
+  <img class="zimg-thumb" src="data:{mime};base64,{b64}"
+       onclick="openZoom(this)" title="Klik untuk fullscreen"/>
+  <div class="zimg-caption">{safe_caption}</div>
+  <div class="zimg-hint">🔍 Klik gambar untuk fullscreen · scroll/tombol untuk zoom</div>
+</div>
+<div class="zimg-overlay" id="zov" onclick="ovClick(event)">
+  <button class="zimg-close" onclick="closeZ()">✕</button>
+  <img class="zimg-modal-img" id="zmi" src="" draggable="false"/>
+  <div class="zimg-modal-cap" id="zmc"></div>
+  <div class="zimg-controls">
+    <button class="zimg-btn" onclick="zm(-0.25)">－</button>
+    <span class="zlevel" id="zlv">100%</span>
+    <button class="zimg-btn" onclick="zm(+0.25)">＋</button>
+    <button class="zimg-btn" onclick="resetZ()" title="Reset">⟳</button>
+  </div>
+</div>
+<script>
+(function(){{
+  var sc=1,drag=false,sx,sy,tx=0,ty=0,mi,ov;
+  function g(){{mi=document.getElementById('zmi');ov=document.getElementById('zov');}}
+  function ap(){{mi.style.transform='translate('+tx+'px,'+ty+'px) scale('+sc+')';
+    document.getElementById('zlv').textContent=Math.round(sc*100)+'%';}}
+  window.openZoom=function(el){{g();sc=1;tx=0;ty=0;mi.src=el.src;
+    document.getElementById('zmc').textContent="{safe_caption}";
+    ap();ov.classList.add('active');document.body.style.overflow='hidden';}};
+  window.closeZ=function(){{g();ov.classList.remove('active');document.body.style.overflow='';}};
+  window.ovClick=function(e){{if(e.target===ov)closeZ();}};
+  window.zm=function(d){{g();sc=Math.min(Math.max(sc+d,.2),8);ap();}};
+  window.resetZ=function(){{g();sc=1;tx=0;ty=0;ap();}};
+  document.addEventListener('wheel',function(e){{g();
+    if(!ov||!ov.classList.contains('active'))return;
+    e.preventDefault();zm(e.deltaY<0?.15:-.15);}},{{passive:false}});
+  document.addEventListener('mousedown',function(e){{g();
+    if(!ov||!ov.classList.contains('active'))return;
+    if(e.target!==mi)return;drag=true;sx=e.clientX-tx;sy=e.clientY-ty;
+    mi.classList.add('grabbing');}});
+  document.addEventListener('mousemove',function(e){{
+    if(!drag)return;tx=e.clientX-sx;ty=e.clientY-sy;ap();}});
+  document.addEventListener('mouseup',function(){{drag=false;if(mi)mi.classList.remove('grabbing');}});
+  document.addEventListener('keydown',function(e){{g();
+    if(!ov||!ov.classList.contains('active'))return;
+    if(e.key==='Escape')closeZ();
+    if(e.key==='+'||e.key==='=')zm(.25);
+    if(e.key==='-')zm(-.25);
+    if(e.key==='0')resetZ();}});
+  var ld=null;
+  document.addEventListener('touchstart',function(e){{
+    if(e.touches.length===2)ld=Math.hypot(
+      e.touches[0].clientX-e.touches[1].clientX,
+      e.touches[0].clientY-e.touches[1].clientY);}},{{passive:true}});
+  document.addEventListener('touchmove',function(e){{g();
+    if(!ov||!ov.classList.contains('active'))return;
+    if(e.touches.length===2){{var d=Math.hypot(
+      e.touches[0].clientX-e.touches[1].clientX,
+      e.touches[0].clientY-e.touches[1].clientY);
+      if(ld)zm((d-ld)*.008);ld=d;}}
+  }},{{passive:true}});
+  document.addEventListener('touchend',function(){{ld=null;}});
+}})();
+</script>
+"""
+        st.components.v1.html(html, height=420, scrolling=False)
+
+    @staticmethod
     def fetch_image_bytes(url: str):
         """Fetch image from URL and return bytes."""
         try:
@@ -988,10 +1093,9 @@ class ExcelSearchApp:
                                 try:
                                     _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
-                                        st.image(
+                                        ExcelSearchApp.render_zoomable_image(
                                             img_bytes,
-                                            caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
-                                            use_container_width=True
+                                            caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})"
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
@@ -1015,7 +1119,8 @@ class ExcelSearchApp:
                         elif img_path:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                st.image(str(img_path), caption=f"{pn} - {pname_ex}", use_container_width=True)
+                                img_data = img_path.read_bytes()
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex}")
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
@@ -1070,10 +1175,9 @@ class ExcelSearchApp:
                                 try:
                                     _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
-                                        st.image(
+                                        ExcelSearchApp.render_zoomable_image(
                                             img_bytes,
-                                            caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
-                                            use_container_width=True
+                                            caption=f"{search_term}  (Gambar {current_idx + 1}/{total})"
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
@@ -1096,7 +1200,8 @@ class ExcelSearchApp:
                         elif img_path:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                st.image(str(img_path), caption=search_term, use_container_width=True)
+                                img_data = img_path.read_bytes()
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=search_term)
 
     def run(self):
         self.display_dashboard()
