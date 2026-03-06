@@ -454,65 +454,6 @@ class ExcelSearchApp:
         return []
 
     @staticmethod
-    def render_zoomable_image(img_bytes: bytes, caption: str = "", zoom_key: str = "zoom_default"):
-        """Tampilkan gambar dengan kontrol zoom menggunakan st.image + CSS transform."""
-        import base64
-
-        zk = f"zoom_scale_{zoom_key}"
-        if zk not in st.session_state:
-            st.session_state[zk] = 100  # persen
-
-        scale = st.session_state[zk]
-
-        # Tombol zoom
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
-        with c1:
-            if st.button("🔍＋", key=f"zi_{zoom_key}", help="Zoom In", use_container_width=True):
-                st.session_state[zk] = min(scale + 25, 300)
-                st.rerun()
-        with c2:
-            if st.button("🔍－", key=f"zo_{zoom_key}", help="Zoom Out", use_container_width=True):
-                st.session_state[zk] = max(scale - 25, 25)
-                st.rerun()
-        with c3:
-            if st.button("⟳", key=f"zr_{zoom_key}", help="Reset zoom", use_container_width=True):
-                st.session_state[zk] = 100
-                st.rerun()
-        with c4:
-            st.markdown(
-                f"<div style='padding:6px 0;color:#555;font-size:.85rem;'>Zoom: <b>{st.session_state[zk]}%</b></div>",
-                unsafe_allow_html=True
-            )
-
-        # Render gambar dengan CSS transform scale
-        b64 = base64.b64encode(img_bytes).decode()
-        sig = img_bytes[:4]
-        if sig[:2] == b'\xff\xd8':
-            mime = "image/jpeg"
-        elif sig[:4] == b'\x89PNG':
-            mime = "image/png"
-        elif sig[:3] == b'GIF':
-            mime = "image/gif"
-        else:
-            mime = "image/jpeg"
-
-        cur_scale = st.session_state[zk]
-        safe_caption = caption.replace("<", "&lt;").replace(">", "&gt;")
-        img_html = f"""
-<div style="overflow:auto; width:100%; text-align:center; padding:4px 0;">
-  <img src="data:{mime};base64,{b64}"
-       style="width:{cur_scale}%; max-width:none;
-              transform-origin:top center;
-              border-radius:8px;
-              box-shadow:0 2px 12px rgba(0,0,0,.18);
-              transition:width .2s ease;"
-       title="{safe_caption}" />
-  <div style="font-size:.78rem;color:#666;margin-top:4px;">{safe_caption}</div>
-</div>
-"""
-        st.markdown(img_html, unsafe_allow_html=True)
-
-    @staticmethod
     def fetch_image_bytes(url: str):
         """Fetch image from URL and return bytes."""
         try:
@@ -1047,10 +988,10 @@ class ExcelSearchApp:
                                 try:
                                     _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
-                                        ExcelSearchApp.render_zoomable_image(
+                                        st.image(
                                             img_bytes,
                                             caption=f"{pn} - {pname_ex}  (Gambar {current_idx + 1}/{total})",
-                                            zoom_key=f"{pn}_{current_idx}"
+                                            use_container_width=True
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
@@ -1074,8 +1015,7 @@ class ExcelSearchApp:
                         elif img_path:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                img_data = img_path.read_bytes()
-                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex}", zoom_key=f"{pn}_local")
+                                st.image(str(img_path), caption=f"{pn} - {pname_ex}", use_container_width=True)
                         else:
                             st.caption("Tidak ada gambar tersedia")
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
@@ -1130,10 +1070,10 @@ class ExcelSearchApp:
                                 try:
                                     _, col_img, _ = st.columns([1, 2, 1])
                                     with col_img:
-                                        ExcelSearchApp.render_zoomable_image(
+                                        st.image(
                                             img_bytes,
                                             caption=f"{search_term}  (Gambar {current_idx + 1}/{total})",
-                                            zoom_key=f"nf_{search_term}_{current_idx}"
+                                            use_container_width=True
                                         )
                                 except Exception as e:
                                     st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
@@ -1156,8 +1096,7 @@ class ExcelSearchApp:
                         elif img_path:
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                img_data = img_path.read_bytes()
-                                ExcelSearchApp.render_zoomable_image(img_data, caption=search_term, zoom_key=f"nf_{search_term}_local")
+                                st.image(str(img_path), caption=search_term, use_container_width=True)
 
     def run(self):
         self.display_dashboard()
