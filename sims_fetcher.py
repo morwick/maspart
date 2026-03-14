@@ -1,18 +1,14 @@
 """
-SIMS Image Fetcher  (v5 — Subprocess Login)
-============================================
+SIMS Image Fetcher  (v7 — Direct API Login dengan RSA + CAPTCHA)
+================================================================
 Install:
-  pip install playwright requests
-  playwright install chromium
+  pip install requests pycryptodome
 """
 
 import json
 import time
 import threading
 import requests
-import subprocess
-import sys
-import os
 from pathlib import Path
 
 # ══════════════════════════════════════════════
@@ -23,10 +19,9 @@ SIMS_USERNAME = "IDZ0050005"
 SIMS_PASSWORD = "Jiahong@010366"
 
 IMAGES_JSON   = Path("images") / "image_links.json"
-LOGIN_PAGE    = f"{SIMS_BASE_URL}/#/login"
 PHOTO_API_URL = f"{SIMS_BASE_URL}/intlapi/intl.service.basic/partPhoto/getPhotoUrlByPartCode"
 
-BASE_HEADERS  = {
+BASE_HEADERS = {
     "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":          "application/json, text/plain, */*",
     "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
@@ -45,62 +40,104 @@ SESSION_TTL   = 55 * 60
 
 
 # ══════════════════════════════════════════════
-#  LOGIN VIA SUBPROCESS
+#  RSA ENCRYPT
 # ══════════════════════════════════════════════
-def _login_playwright() -> str:
-    helper_path = Path(__file__).parent / "sims_login_helper.py"
-    if not helper_path.exists():
-        raise RuntimeError(
-            "sims_login_helper.py tidak ditemukan di: " + str(helper_path) + "\n"
-            "Pastikan file sims_login_helper.py ada di folder yang sama dengan sims_fetcher.py"
-        )
-
-    print(f"[sims_fetcher] Python executable: {sys.executable}")
-    print(f"[sims_fetcher] Helper path: {helper_path}")
-    print("[sims_fetcher] Membuka browser untuk login SIMS (subprocess)...")
-
+def _rsa_encrypt(public_key_b64: str, plaintext: str) -> str:
+    """Enkripsi password dengan RSA public key (PKCS#1 v1.5)."""
+    import base64
     try:
-        proc = subprocess.Popen(
-            [sys.executable, str(helper_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=os.environ.copy(),
+        from Crypto.PublicKey import RSA
+        from Crypto.Cipher import PKCS1_v1_5
+    except ImportError:
+        raise RuntimeError(
+            "pycryptodome belum terinstall.\n"
+            "Jalankan: pip install pycryptodome"
         )
-        stdout, stderr = proc.communicate(timeout=120)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        raise RuntimeError("Login SIMS timeout (120 detik)")
-    except Exception as e:
-        raise RuntimeError("Gagal menjalankan login helper: " + str(e))
+    der = base64.b64decode(public_key_b64)
+    key = RSA.import_key(der)
+    cipher = PKCS1_v1_5.new(key)
+    encrypted = cipher.encrypt(plaintext.encode("utf-8"))
+    return base64.b64encode(encrypted).decode("utf-8")
 
-    print(f"[sims_fetcher] subprocess returncode: {returncode}")
-    if stdout:
-        for line in stdout.splitlines():
-            print(f"[sims_fetcher] OUT: {line}")
-    if stderr:
-        for line in stderr.splitlines():
-            print(f"[sims_fetcher] ERR: {line}")
 
-    token = None
-    error = None
-    for line in stdout.splitlines():
-        line = line.strip()
-        if line.startswith("TOKEN:"):
-            token = line[len("TOKEN:"):]
-        elif line.startswith("ERROR:"):
-            error = line[len("ERROR:"):]
+# ══════════════════════════════════════════════
+#  LOGIN VIA DIRECT API
+# ══════════════════════════════════════════════
+def _login_direct() -> str:
+    """
+    Login ke SIMS via HTTP langsung:
+    1. Ambil RSA public key
+    2. Ambil captchaId
+    3. POST login dengan password ter-enkripsi + captchaId
+    """
+    session = requests.Session()
+    session.headers.update(BASE_HEADERS)
 
-    if token:
-        print(f"[sims_fetcher] Token tertangkap: {token[:50]}...")
-        print("[sims_fetcher] ✅ Login berhasil via Playwright!")
-        return token
-
-    raise RuntimeError(
-        "Login gagal: " + (error or "token tidak tertangkap") + "\n"
-        "Periksa username/password di sims_login_helper.py"
+    # ── Step 1: Ambil RSA public key ──
+    print("[sims_fetcher] Ambil RSA public key...")
+    resp = session.get(
+        f"{SIMS_BASE_URL}/intlapi/intl.auth/common/login/rsa-public-key",
+        timeout=15
     )
+    resp.raise_for_status()
+    public_key = resp.json().get("publicKey", "")
+    if not public_key:
+        raise RuntimeError("Gagal ambil RSA public key")
+    print(f"[sims_fetcher] RSA public key OK ({len(public_key)} chars)")
+
+    # ── Step 2: Enkripsi password ──
+    print("[sims_fetcher] Enkripsi password...")
+    encrypted_password = _rsa_encrypt(public_key, SIMS_PASSWORD)
+    print(f"[sims_fetcher] Password terenkripsi OK ({len(encrypted_password)} chars)")
+
+    # ── Step 3: Ambil captchaId ──
+    print("[sims_fetcher] Ambil captcha config...")
+    resp = session.get(
+        f"{SIMS_BASE_URL}/intlapi/intl.auth/common/login-captcha-config",
+        timeout=15
+    )
+    resp.raise_for_status()
+    captcha_data = resp.json()
+    captcha_enabled = captcha_data.get("captchaEnabled", False)
+    captcha_id = captcha_data.get("captchaId", "")
+    print(f"[sims_fetcher] captchaEnabled={captcha_enabled}, captchaId={captcha_id}")
+
+    # ── Step 4: Fetch captcha image (diperlukan agar captchaId valid di server) ──
+    if captcha_enabled and captcha_id:
+        session.get(
+            f"{SIMS_BASE_URL}/intlapi/intl.auth/common/getLoginCaptchaCode/{captcha_id}",
+            timeout=15
+        )
+        print(f"[sims_fetcher] Captcha image fetched")
+
+    # ── Step 5: POST login dengan multipart/form-data ──
+    print("[sims_fetcher] POST login...")
+    form_data = {
+        "username": (None, SIMS_USERNAME),
+        "password": (None, encrypted_password),
+    }
+    if captcha_enabled and captcha_id:
+        form_data["captchaId"] = (None, captcha_id)
+
+    resp = session.post(
+        f"{SIMS_BASE_URL}/intlapi/intl.auth/login",
+        files=form_data,
+        timeout=30,
+    )
+    print(f"[sims_fetcher] Login response: {resp.status_code} | {resp.text[:300]}")
+    resp.raise_for_status()
+
+    data = resp.json()
+    token = data.get("token", "")
+    if not token:
+        raise RuntimeError(f"Token tidak ada di response: {resp.text[:200]}")
+
+    if not token.startswith("Bearer "):
+        token = f"Bearer {token}"
+
+    print(f"[sims_fetcher] ✅ Login berhasil via direct API!")
+    print(f"[sims_fetcher] Token: {token[:60]}...")
+    return token
 
 
 # ══════════════════════════════════════════════
@@ -110,7 +147,7 @@ def _get_token() -> str:
     global _token, _token_expiry
     with _token_lock:
         if _token is None or time.time() >= _token_expiry:
-            _token        = _login_playwright()
+            _token        = _login_direct()
             _token_expiry = time.time() + SESSION_TTL
         return _token
 
@@ -226,6 +263,7 @@ def get_sims_images(part_number: str, force_refresh: bool = False) -> tuple:
 #  CLI TEST
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
+    import sys
     pn = sys.argv[1] if len(sys.argv) > 1 else "811W25503-0244"
     print(f"{'='*55}")
     print(f"  Test SIMS fetch: {pn}")
