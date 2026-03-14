@@ -5,11 +5,33 @@ JANGAN diubah nama file ini.
 """
 
 import sys
+import os
+import shutil
 
 SIMS_BASE_URL = "http://simscloud.cnhtcerp.com:8082"
 SIMS_USERNAME = "IDZ0050005"
 SIMS_PASSWORD = "Jiahong@010366"
 LOGIN_PAGE    = f"{SIMS_BASE_URL}/#/login"
+
+
+def _find_chromium():
+    """Cari path Chromium yang tersedia di sistem."""
+    candidates = [
+        # Streamlit Cloud / Ubuntu / Debian
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/snap/bin/chromium",
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        shutil.which("google-chrome"),
+        shutil.which("google-chrome-stable"),
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return None  # Biarkan Playwright cari sendiri (Windows lokal)
 
 
 def main():
@@ -20,10 +42,25 @@ def main():
         sys.exit(1)
 
     token_holder = {"token": None}
+    system_chromium = _find_chromium()
+
+    launch_kwargs = {
+        "headless": True,
+        "args": [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-setuid-sandbox",
+            "--disable-extensions",
+        ],
+    }
+    if system_chromium:
+        launch_kwargs["executable_path"] = system_chromium
+        print(f"INFO:Menggunakan Chromium: {system_chromium}", flush=True)
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(**launch_kwargs)
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -53,7 +90,6 @@ def main():
             page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
 
-            # Cari input username & password
             username_input = (
                 page.query_selector("input[type='text']") or
                 page.query_selector("input[autocomplete='username']") or
@@ -79,7 +115,6 @@ def main():
             password_input.fill(SIMS_PASSWORD)
             page.wait_for_timeout(300)
 
-            # Klik tombol login
             login_btn = (
                 page.query_selector("button[type='submit']") or
                 page.query_selector("button:has-text('Login')") or
@@ -93,22 +128,16 @@ def main():
             else:
                 password_input.press("Enter")
 
-            # Tunggu redirect
             try:
-                page.wait_for_url(
-                    lambda url: "login" not in url,
-                    timeout=15000
-                )
+                page.wait_for_url(lambda url: "login" not in url, timeout=15000)
             except Exception:
                 pass
 
-            # Tunggu token dari interceptor
             for _ in range(10):
                 if token_holder["token"]:
                     break
                 page.wait_for_timeout(500)
 
-            # Fallback: localStorage
             if not token_holder["token"]:
                 try:
                     ls_data = page.evaluate("""() => {
@@ -132,7 +161,6 @@ def main():
             browser.close()
 
         if token_holder["token"]:
-            # Print token ke stdout — dibaca oleh sims_fetcher.py
             print(f"TOKEN:{token_holder['token']}", flush=True)
             sys.exit(0)
         else:
