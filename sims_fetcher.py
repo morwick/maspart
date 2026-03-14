@@ -46,47 +46,52 @@ SESSION_TTL   = 55 * 60
 #  Menghindari konflik event loop dengan Streamlit
 # ══════════════════════════════════════════════
 def _login_playwright() -> str:
-    """
-    Memanggil sims_login_helper.py sebagai subprocess Python terpisah.
-    Cara ini menghindari konflik asyncio event loop antara Playwright & Streamlit.
-    sims_login_helper.py harus berada di folder yang sama dengan sims_fetcher.py.
-    """
     import subprocess
     import sys
+    import os
 
-    # Cari path helper — di folder yang sama dengan file ini
     helper_path = Path(__file__).parent / "sims_login_helper.py"
     if not helper_path.exists():
         raise RuntimeError(
-            f"sims_login_helper.py tidak ditemukan di:\n{helper_path}\n"
+            f"sims_login_helper.py tidak ditemukan di:
+{helper_path}
+"
             "Pastikan file sims_login_helper.py ada di folder yang sama dengan sims_fetcher.py"
         )
 
+    print(f"[sims_fetcher] Python executable: {sys.executable}")
+    print(f"[sims_fetcher] Helper path: {helper_path}")
+    print(f"[sims_fetcher] Helper exists: {helper_path.exists()}")
     print("[sims_fetcher] Membuka browser untuk login SIMS (subprocess)...")
 
     try:
-        result = subprocess.run(
+        # Jalankan dengan Popen agar stdout/stderr langsung terprint ke log
+        proc = subprocess.Popen(
             [sys.executable, str(helper_path)],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=120,
+            env=os.environ.copy(),
         )
+        stdout, stderr = proc.communicate(timeout=120)
+        returncode = proc.returncode
     except subprocess.TimeoutExpired:
+        proc.kill()
         raise RuntimeError("Login SIMS timeout (120 detik)")
     except Exception as e:
         raise RuntimeError(f"Gagal menjalankan login helper: {e}")
 
-    # Debug: selalu print stdout dan stderr
-    print(f"[sims_fetcher] subprocess returncode: {result.returncode}")
-    if result.stdout:
-        print(f"[sims_fetcher] stdout:\n{result.stdout[:2000]}")
-    if result.stderr:
-        print(f"[sims_fetcher] stderr:\n{result.stderr[:2000]}")
+    print(f"[sims_fetcher] subprocess returncode: {returncode}")
+    if stdout:
+        for line in stdout.splitlines():
+            print(f"[sims_fetcher] OUT: {line}")
+    if stderr:
+        for line in stderr.splitlines():
+            print(f"[sims_fetcher] ERR: {line}")
 
-    # Parse output baris per baris
     token = None
     error = None
-    for line in result.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("TOKEN:"):
             token = line[len("TOKEN:"):]
@@ -98,15 +103,11 @@ def _login_playwright() -> str:
         print("[sims_fetcher] ✅ Login berhasil via Playwright!")
         return token
 
-    # Tampilkan stderr untuk debugging jika gagal
-    if result.stderr:
-        print(f"[sims_fetcher] stderr:\n{result.stderr[:500]}")
-
     raise RuntimeError(
-        f"Login gagal: {error or 'token tidak tertangkap'}\n"
+        f"Login gagal: {error or 'token tidak tertangkap'}
+"
         "Periksa username/password di sims_login_helper.py"
     )
-
 
 
 # ══════════════════════════════════════════════
