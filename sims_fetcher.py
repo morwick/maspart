@@ -1,5 +1,5 @@
 """
-SIMS Image Fetcher  (v4 — Playwright Login)
+SIMS Image Fetcher  (v5 — Subprocess Login)
 ============================================
 Install:
   pip install playwright requests
@@ -10,6 +10,9 @@ import json
 import time
 import threading
 import requests
+import subprocess
+import sys
+import os
 from pathlib import Path
 
 # ══════════════════════════════════════════════
@@ -42,30 +45,21 @@ SESSION_TTL   = 55 * 60
 
 
 # ══════════════════════════════════════════════
-#  LOGIN VIA PLAYWRIGHT (subprocess terpisah)
-#  Menghindari konflik event loop dengan Streamlit
+#  LOGIN VIA SUBPROCESS
 # ══════════════════════════════════════════════
 def _login_playwright() -> str:
-    import subprocess
-    import sys
-    import os
-
     helper_path = Path(__file__).parent / "sims_login_helper.py"
     if not helper_path.exists():
         raise RuntimeError(
-            f"sims_login_helper.py tidak ditemukan di:
-{helper_path}
-"
+            "sims_login_helper.py tidak ditemukan di: " + str(helper_path) + "\n"
             "Pastikan file sims_login_helper.py ada di folder yang sama dengan sims_fetcher.py"
         )
 
     print(f"[sims_fetcher] Python executable: {sys.executable}")
     print(f"[sims_fetcher] Helper path: {helper_path}")
-    print(f"[sims_fetcher] Helper exists: {helper_path.exists()}")
     print("[sims_fetcher] Membuka browser untuk login SIMS (subprocess)...")
 
     try:
-        # Jalankan dengan Popen agar stdout/stderr langsung terprint ke log
         proc = subprocess.Popen(
             [sys.executable, str(helper_path)],
             stdout=subprocess.PIPE,
@@ -79,7 +73,7 @@ def _login_playwright() -> str:
         proc.kill()
         raise RuntimeError("Login SIMS timeout (120 detik)")
     except Exception as e:
-        raise RuntimeError(f"Gagal menjalankan login helper: {e}")
+        raise RuntimeError("Gagal menjalankan login helper: " + str(e))
 
     print(f"[sims_fetcher] subprocess returncode: {returncode}")
     if stdout:
@@ -104,8 +98,7 @@ def _login_playwright() -> str:
         return token
 
     raise RuntimeError(
-        f"Login gagal: {error or 'token tidak tertangkap'}
-"
+        "Login gagal: " + (error or "token tidak tertangkap") + "\n"
         "Periksa username/password di sims_login_helper.py"
     )
 
@@ -233,7 +226,6 @@ def get_sims_images(part_number: str, force_refresh: bool = False) -> tuple:
 #  CLI TEST
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
-    import sys
     pn = sys.argv[1] if len(sys.argv) > 1 else "811W25503-0244"
     print(f"{'='*55}")
     print(f"  Test SIMS fetch: {pn}")
