@@ -5,11 +5,40 @@ JANGAN diubah nama file ini.
 """
 
 import sys
+import os
+import subprocess
+import glob
+
 
 SIMS_BASE_URL = "http://simscloud.cnhtcerp.com:8082"
 SIMS_USERNAME = "IDZ0050005"
 SIMS_PASSWORD = "Jiahong@010366"
 LOGIN_PAGE    = f"{SIMS_BASE_URL}/#/login"
+
+
+def _ensure_chromium():
+    """Install Playwright Chromium jika belum ada, apapun versinya."""
+    cache_dir = os.path.expanduser("~/.cache/ms-playwright")
+    # Cari file chrome-headless-shell atau chrome di cache Playwright
+    patterns = [
+        os.path.join(cache_dir, "**/chrome-headless-shell"),
+        os.path.join(cache_dir, "**/chrome"),
+        os.path.join(cache_dir, "**/chromium"),
+    ]
+    found = any(glob.glob(p, recursive=True) for p in patterns)
+
+    if not found:
+        print("INFO:Chromium belum ada, install otomatis...", flush=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode == 0:
+            print("INFO:Chromium berhasil diinstall", flush=True)
+        else:
+            print(f"INFO:playwright install output: {result.stderr[:500]}", flush=True)
+    else:
+        print("INFO:Chromium sudah tersedia", flush=True)
 
 
 def main():
@@ -19,10 +48,10 @@ def main():
         print("ERROR:Playwright belum terinstall", flush=True)
         sys.exit(1)
 
+    _ensure_chromium()
+
     token_holder = {"token": None}
 
-    # Playwright download Chromium sendiri via `playwright install chromium`
-    # Tidak perlu executable_path — bekerja di Windows lokal maupun Streamlit Cloud
     launch_kwargs = {
         "headless": True,
         "args": [
