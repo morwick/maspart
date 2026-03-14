@@ -1,7 +1,5 @@
 """
-SIMS Login Helper — dijalankan sebagai subprocess terpisah oleh sims_fetcher.py
-Tugasnya hanya login ke SIMS via Playwright dan print token ke stdout.
-JANGAN diubah nama file ini.
+SIMS Login Helper — debug version untuk Streamlit Cloud
 """
 
 import sys
@@ -17,7 +15,6 @@ LOGIN_PAGE    = f"{SIMS_BASE_URL}/#/login"
 
 
 def _ensure_chromium():
-    """Install Playwright Chromium jika belum ada, apapun versinya."""
     cache_dir = os.path.expanduser("~/.cache/ms-playwright")
     patterns = [
         os.path.join(cache_dir, "**/chrome-headless-shell"),
@@ -26,15 +23,47 @@ def _ensure_chromium():
     ]
     found = any(glob.glob(p, recursive=True) for p in patterns)
     if not found:
-        print("INFO:Chromium belum ada, install otomatis...", flush=True)
-        result = subprocess.run(
+        print("INFO:Install chromium...", flush=True)
+        subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True, text=True, timeout=300
         )
-        if result.returncode == 0:
-            print("INFO:Chromium berhasil diinstall", flush=True)
-        else:
-            print(f"INFO:playwright install output: {result.stderr[:500]}", flush=True)
+
+
+def _debug_environment():
+    """Print info lingkungan untuk debugging."""
+    import shutil
+
+    # Cek /dev/shm size
+    try:
+        shm_stat = os.statvfs("/dev/shm")
+        shm_mb = (shm_stat.f_blocks * shm_stat.f_frsize) / (1024 * 1024)
+        print(f"INFO:/dev/shm size: {shm_mb:.0f} MB", flush=True)
+    except Exception as e:
+        print(f"INFO:/dev/shm error: {e}", flush=True)
+
+    # Cek RAM total
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if "MemTotal" in line or "MemAvailable" in line:
+                    print(f"INFO:{line.strip()}", flush=True)
+    except Exception:
+        pass
+
+    # Cek chromium yang tersedia di sistem
+    for cmd in ["chromium", "chromium-browser", "google-chrome"]:
+        path = shutil.which(cmd)
+        if path:
+            print(f"INFO:Found {cmd} at {path}", flush=True)
+
+    # List isi playwright cache
+    cache_dir = os.path.expanduser("~/.cache/ms-playwright")
+    if os.path.exists(cache_dir):
+        for item in os.listdir(cache_dir):
+            print(f"INFO:playwright cache: {item}", flush=True)
+    else:
+        print("INFO:playwright cache kosong", flush=True)
 
 
 def main():
@@ -45,13 +74,10 @@ def main():
         sys.exit(1)
 
     _ensure_chromium()
+    _debug_environment()
 
     token_holder = {"token": None}
 
-    # Args khusus untuk Streamlit Cloud:
-    # --disable-dev-shm-usage  → pakai /tmp bukan /dev/shm (fix crash di container)
-    # --single-process         → kurangi memory usage
-    # --js-flags=--max-old-space-size=256 → batasi heap JS
     launch_kwargs = {
         "headless": True,
         "args": [
@@ -60,32 +86,16 @@ def main():
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--disable-extensions",
-            "--disable-background-networking",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-breakpad",
-            "--disable-client-side-phishing-detection",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--disable-hang-monitor",
-            "--disable-ipc-flooding-protection",
-            "--disable-popup-blocking",
-            "--disable-prompt-on-repost",
-            "--disable-renderer-backgrounding",
-            "--disable-sync",
-            "--disable-translate",
-            "--metrics-recording-only",
             "--no-first-run",
-            "--safebrowsing-disable-auto-update",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "--single-process",
         ],
     }
 
     try:
         with sync_playwright() as p:
+            print("INFO:Launch browser...", flush=True)
             browser = p.chromium.launch(**launch_kwargs)
+            print("INFO:Browser launched OK", flush=True)
+
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -112,6 +122,7 @@ def main():
                         pass
 
             page.on("response", on_response)
+            print(f"INFO:Goto {LOGIN_PAGE}", flush=True)
             page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
 
