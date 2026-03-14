@@ -19,14 +19,12 @@ LOGIN_PAGE    = f"{SIMS_BASE_URL}/#/login"
 def _ensure_chromium():
     """Install Playwright Chromium jika belum ada, apapun versinya."""
     cache_dir = os.path.expanduser("~/.cache/ms-playwright")
-    # Cari file chrome-headless-shell atau chrome di cache Playwright
     patterns = [
         os.path.join(cache_dir, "**/chrome-headless-shell"),
         os.path.join(cache_dir, "**/chrome"),
         os.path.join(cache_dir, "**/chromium"),
     ]
     found = any(glob.glob(p, recursive=True) for p in patterns)
-
     if not found:
         print("INFO:Chromium belum ada, install otomatis...", flush=True)
         result = subprocess.run(
@@ -37,8 +35,6 @@ def _ensure_chromium():
             print("INFO:Chromium berhasil diinstall", flush=True)
         else:
             print(f"INFO:playwright install output: {result.stderr[:500]}", flush=True)
-    else:
-        print("INFO:Chromium sudah tersedia", flush=True)
 
 
 def main():
@@ -52,14 +48,38 @@ def main():
 
     token_holder = {"token": None}
 
+    # Args khusus untuk Streamlit Cloud:
+    # --disable-dev-shm-usage  → pakai /tmp bukan /dev/shm (fix crash di container)
+    # --single-process         → kurangi memory usage
+    # --js-flags=--max-old-space-size=256 → batasi heap JS
     launch_kwargs = {
         "headless": True,
         "args": [
             "--no-sandbox",
+            "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-setuid-sandbox",
             "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-breakpad",
+            "--disable-client-side-phishing-detection",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-hang-monitor",
+            "--disable-ipc-flooding-protection",
+            "--disable-popup-blocking",
+            "--disable-prompt-on-repost",
+            "--disable-renderer-backgrounding",
+            "--disable-sync",
+            "--disable-translate",
+            "--metrics-recording-only",
+            "--no-first-run",
+            "--safebrowsing-disable-auto-update",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--single-process",
         ],
     }
 
