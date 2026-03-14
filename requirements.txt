@@ -1,31 +1,9 @@
-# ══════════════════════════════════════════════
-#  Requirements — Excel Part Search Web App
-#  Install: pip install -r requirements.txt
-# ══════════════════════════════════════════════
-
-# Web framework
 streamlit
-
-# Data processing
 pandas
 numpy
 openpyxl
-
-# Image processing
 Pillow
-
-# HTTP requests
 requests
-
-# Deep learning (opsional — hanya untuk fitur "Cari by Gambar")
-# Hapus baris ini jika tidak menggunakan fitur image search
+pycryptodome
 torch
 torchvision
-
-# SIMS Image Fetcher
-playwright
-
-# ══════════════════════════════════════════════
-#  Setelah install, jalankan juga:
-#  playwright install chromium
-# ══════════════════════════════════════════════
