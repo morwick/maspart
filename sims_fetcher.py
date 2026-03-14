@@ -76,6 +76,13 @@ def _login_playwright() -> str:
     except Exception as e:
         raise RuntimeError(f"Gagal menjalankan login helper: {e}")
 
+    # Debug: selalu print stdout dan stderr
+    print(f"[sims_fetcher] subprocess returncode: {result.returncode}")
+    if result.stdout:
+        print(f"[sims_fetcher] stdout:\n{result.stdout[:2000]}")
+    if result.stderr:
+        print(f"[sims_fetcher] stderr:\n{result.stderr[:2000]}")
+
     # Parse output baris per baris
     token = None
     error = None
