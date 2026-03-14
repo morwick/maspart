@@ -1,12 +1,11 @@
 """
-SIMS Login Helper — debug version untuk Streamlit Cloud
+SIMS Login Helper — dijalankan sebagai subprocess terpisah oleh sims_fetcher.py
 """
 
 import sys
 import os
 import subprocess
 import glob
-
 
 SIMS_BASE_URL = "http://simscloud.cnhtcerp.com:8082"
 SIMS_USERNAME = "IDZ0050005"
@@ -28,42 +27,8 @@ def _ensure_chromium():
             [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True, text=True, timeout=300
         )
-
-
-def _debug_environment():
-    """Print info lingkungan untuk debugging."""
-    import shutil
-
-    # Cek /dev/shm size
-    try:
-        shm_stat = os.statvfs("/dev/shm")
-        shm_mb = (shm_stat.f_blocks * shm_stat.f_frsize) / (1024 * 1024)
-        print(f"INFO:/dev/shm size: {shm_mb:.0f} MB", flush=True)
-    except Exception as e:
-        print(f"INFO:/dev/shm error: {e}", flush=True)
-
-    # Cek RAM total
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if "MemTotal" in line or "MemAvailable" in line:
-                    print(f"INFO:{line.strip()}", flush=True)
-    except Exception:
-        pass
-
-    # Cek chromium yang tersedia di sistem
-    for cmd in ["chromium", "chromium-browser", "google-chrome"]:
-        path = shutil.which(cmd)
-        if path:
-            print(f"INFO:Found {cmd} at {path}", flush=True)
-
-    # List isi playwright cache
-    cache_dir = os.path.expanduser("~/.cache/ms-playwright")
-    if os.path.exists(cache_dir):
-        for item in os.listdir(cache_dir):
-            print(f"INFO:playwright cache: {item}", flush=True)
     else:
-        print("INFO:playwright cache kosong", flush=True)
+        print("INFO:Chromium cache ditemukan", flush=True)
 
 
 def main():
@@ -74,9 +39,18 @@ def main():
         sys.exit(1)
 
     _ensure_chromium()
-    _debug_environment()
 
     token_holder = {"token": None}
+
+    # Cek apakah ada chromium di sistem (Debian Trixie Streamlit Cloud)
+    import shutil
+    system_chromium = (
+        shutil.which("chromium") or
+        shutil.which("chromium-browser") or
+        shutil.which("google-chrome-stable") or
+        shutil.which("google-chrome")
+    )
+    print(f"INFO:System chromium: {system_chromium}", flush=True)
 
     launch_kwargs = {
         "headless": True,
@@ -87,14 +61,24 @@ def main():
             "--disable-gpu",
             "--disable-extensions",
             "--no-first-run",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-sync",
         ],
     }
+
+    # Jika ada chromium sistem, pakai itu — lebih stabil di container
+    if system_chromium and os.path.exists(system_chromium):
+        launch_kwargs["executable_path"] = system_chromium
+        print(f"INFO:Pakai system chromium: {system_chromium}", flush=True)
+    else:
+        print("INFO:Pakai playwright chromium", flush=True)
 
     try:
         with sync_playwright() as p:
             print("INFO:Launch browser...", flush=True)
             browser = p.chromium.launch(**launch_kwargs)
-            print("INFO:Browser launched OK", flush=True)
+            print("INFO:Browser OK", flush=True)
 
             context = browser.new_context(
                 user_agent=(
@@ -122,7 +106,7 @@ def main():
                         pass
 
             page.on("response", on_response)
-            print(f"INFO:Goto {LOGIN_PAGE}", flush=True)
+            print(f"INFO:Goto login page...", flush=True)
             page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
 
