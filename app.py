@@ -332,6 +332,152 @@ def build_batch_excel(df_result: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> bytes:
+    """
+    Build catalog Excel: Part Number | Part Name | Kecocokan | Gambar
+    Gambar diambil dari SIMS — gambar ke-2 jika ada, else gambar ke-1.
+    Satu baris per unique Part Number (ditemukan / tidak ditemukan).
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.drawing.image import Image as XLImage
+    import tempfile, os
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Catalog"
+
+    # ── header style ──
+    header_fill = PatternFill("solid", fgColor="1565C0")
+    header_font = Font(bold=True, color="FFFFFF", name="Arial", size=11)
+    center      = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left        = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    thin        = Side(style="thin", color="BDBDBD")
+    border      = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    headers = ["Part Number", "Part Name", "Kecocokan", "Gambar"]
+    col_widths = [20, 30, 45, 38]
+    for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = center
+        cell.border    = border
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[1].height = 22
+
+    fill_even = PatternFill("solid", fgColor="E3F2FD")
+    fill_odd  = PatternFill("solid", fgColor="FAFAFA")
+    fill_nf   = PatternFill("solid", fgColor="FFEBEE")
+
+    # ── kumpulkan 1 baris per PN ──
+    # Kecocokan = semua nilai "Hasil" yang ditemukan, digabung newline
+    grouped = {}
+    for _, r in df_result.iterrows():
+        pn     = r["_pn_group"]
+        status = r.get("Status", "")
+        hasil  = r.get("Hasil", "")
+        pname  = r.get("Part Name", "")
+        if pn not in grouped:
+            grouped[pn] = {"Part Name": pname, "kecocokan_list": [], "found": False}
+        if status == "✅ Ditemukan" and hasil:
+            grouped[pn]["kecocokan_list"].append(hasil)
+            grouped[pn]["found"] = True
+            if not grouped[pn]["Part Name"]:
+                grouped[pn]["Part Name"] = pname
+
+    tmp_files = []
+    row_idx   = 2
+    total_pn  = len(grouped)
+
+    for i, (pn, info) in enumerate(grouped.items()):
+        if progress_callback:
+            progress_callback(i, total_pn, pn)
+
+        kecocokan = "\n".join(info["kecocokan_list"]) if info["kecocokan_list"] else "—"
+        is_found  = info["found"]
+        fill      = (fill_even if i % 2 == 0 else fill_odd) if is_found else fill_nf
+
+        # row height default — akan di-override jika ada gambar
+        row_height = 80
+
+        # ── fetch gambar SIMS ──
+        img_obj = None
+        if SIMS_ENABLED and is_found:
+            try:
+                urls, err = _sims_fetch(pn)
+                if urls:
+                    pick_url = urls[1] if len(urls) >= 2 else urls[0]
+                    img_bytes, fetch_err = ExcelSearchApp.fetch_image_bytes(pick_url)
+                    if img_bytes:
+                        from PIL import Image as PILImage
+                        pil_img = PILImage.open(io.BytesIO(img_bytes))
+                        # resize agar muat di sel (max 200px tinggi)
+                        MAX_H = 200
+                        w_px, h_px = pil_img.size
+                        if h_px > MAX_H:
+                            ratio  = MAX_H / h_px
+                            w_px   = int(w_px * ratio)
+                            h_px   = MAX_H
+                            pil_img = pil_img.resize((w_px, h_px), PILImage.LANCZOS)
+                        # simpan ke tmp
+                        fmt = "PNG"
+                        suffix = ".png"
+                        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                        pil_img.save(tmp.name, format=fmt)
+                        tmp.close()
+                        tmp_files.append(tmp.name)
+                        img_obj    = XLImage(tmp.name)
+                        img_obj.width  = w_px
+                        img_obj.height = h_px
+                        # row height (pt ≈ pixel * 0.75)
+                        row_height = max(int(h_px * 0.75) + 10, 80)
+            except Exception as e:
+                print(f"[catalog] Gagal ambil gambar {pn}: {e}")
+
+        ws.row_dimensions[row_idx].height = row_height
+
+        # tulis sel A–C
+        vals = [pn, info["Part Name"], kecocokan]
+        aligns = [center, left, left]
+        for ci, (val, aln) in enumerate(zip(vals, aligns), start=1):
+            cell            = ws.cell(row=row_idx, column=ci, value=val)
+            cell.fill       = fill
+            cell.border     = border
+            cell.alignment  = aln
+            cell.font       = Font(name="Arial", size=10)
+
+        # sel D (gambar)
+        dcell            = ws.cell(row=row_idx, column=4, value="")
+        dcell.fill       = fill
+        dcell.border     = border
+        dcell.alignment  = center
+
+        if img_obj:
+            col_letter = get_column_letter(4)
+            cell_addr  = f"{col_letter}{row_idx}"
+            ws.add_image(img_obj, cell_addr)
+
+        row_idx += 1
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = buf.getvalue()
+
+    # cleanup tmp files
+    for f in tmp_files:
+        try:
+            os.unlink(f)
+        except Exception:
+            pass
+
+    return result
+
+
 def make_template_excel() -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -750,61 +896,83 @@ class ExcelSearchApp:
             st.dataframe(pd.DataFrame({"Part Number": part_numbers}),
                          hide_index=True, height=200)
 
-        if not st.button("🔍 Proses Batch Search", type="primary",
-                         use_container_width=True, key="batch_process_btn"):
-            return
+        if st.button("🔍 Proses Batch Search", type="primary",
+                     use_container_width=True, key="batch_process_btn"):
 
-        if not st.session_state.excel_files:
-            st.error("Tidak ada file Excel yang ter-index di folder data/.")
-            return
+            if not st.session_state.excel_files:
+                st.error("Tidak ada file Excel yang ter-index di folder data/.")
+                st.stop()
 
-        # ── Proses pencarian ──
-        prog        = st.progress(0)
-        status_txt  = st.empty()
-        total       = len(part_numbers)
-        results_all = []
+            # ── Proses pencarian ──
+            prog        = st.progress(0)
+            status_txt  = st.empty()
+            total       = len(part_numbers)
+            results_all = []
 
-        for i, pn in enumerate(part_numbers):
-            status_txt.text(f"🔍 Mencari {i+1}/{total}: {pn}")
-            prog.progress((i + 1) / total)
-
-            found = search_part_number(pn, st.session_state.excel_files, self.stok_cache)
-
-            if found:
-                first = True
-                for r in found:
+            for i, pn in enumerate(part_numbers):
+                status_txt.text(f"🔍 Mencari {i+1}/{total}: {pn}")
+                prog.progress((i + 1) / total)
+                found = search_part_number(pn, st.session_state.excel_files, self.stok_cache)
+                if found:
+                    first = True
+                    for r in found:
+                        results_all.append({
+                            "Part Number": pn if first else "",
+                            "_pn_group":   pn,
+                            "Hasil":       r["File"],
+                            "Sheet":       r["Sheet"],
+                            "Part Name":   r["Part Name"],
+                            "Qty":         r["Quantity"],
+                            "Stok":        r["Stok"],
+                            "Status":      "✅ Ditemukan",
+                        })
+                        first = False
+                else:
                     results_all.append({
-                        "Part Number": pn if first else "",
-                        "_pn_group":   pn,
-                        "Hasil":       r["File"],
-                        "Sheet":       r["Sheet"],
-                        "Part Name":   r["Part Name"],
-                        "Qty":         r["Quantity"],
-                        "Stok":        r["Stok"],
-                        "Status":      "✅ Ditemukan",
+                        "Part Number": pn, "_pn_group": pn,
+                        "Hasil": "", "Sheet": "", "Part Name": "",
+                        "Qty": "", "Stok": "", "Status": "❌ Tidak ditemukan",
                     })
-                    first = False
-            else:
-                results_all.append({
-                    "Part Number": pn, "_pn_group": pn,
-                    "Hasil": "", "Sheet": "", "Part Name": "",
-                    "Qty": "", "Stok": "", "Status": "❌ Tidak ditemukan",
-                })
 
-        prog.empty()
-        status_txt.empty()
+            prog.empty()
+            status_txt.empty()
 
-        df_result = pd.DataFrame(results_all)
+            df_result = pd.DataFrame(results_all)
 
-        # Statistik
+            # ── Fetch gambar SIMS & build catalog bytes ──
+            prog_cat   = st.progress(0)
+            status_cat = st.empty()
+
+            def _prog(i, tot, pn):
+                prog_cat.progress((i + 1) / max(tot, 1))
+                status_cat.text(f"🖼️ Fetch gambar {i+1}/{tot}: {pn}")
+
+            try:
+                cat_bytes = build_catalog_excel(df_result, progress_callback=_prog)
+                st.session_state["batch_catalog_bytes"]     = cat_bytes
+                st.session_state["batch_catalog_df"]        = df_result
+                st.session_state["batch_catalog_timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
+            except Exception as e:
+                st.error(f"❌ Gagal membuat katalog: {e}")
+            finally:
+                prog_cat.empty()
+                status_cat.empty()
+
+            st.rerun()
+
+        # ── Tampilkan hasil & tombol download (persisten via session_state) ──
+        if "batch_catalog_df" not in st.session_state:
+            return
+
+        df_result = st.session_state["batch_catalog_df"]
         found_pn  = df_result[df_result["Status"] == "✅ Ditemukan"]["_pn_group"].nunique()
-        not_found = total - found_pn
+        not_found = df_result["_pn_group"].nunique() - found_pn
+
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Part Number", total)
+        c1.metric("Total Part Number", df_result["_pn_group"].nunique())
         c2.metric("✅ Ditemukan", found_pn)
         c3.metric("❌ Tidak Ditemukan", not_found)
 
-        # Preview tabel
         st.markdown("#### 📋 Preview Hasil")
         disp_cols = ["Part Number","Hasil","Sheet","Part Name","Qty","Stok","Status"]
         st.dataframe(
@@ -821,16 +989,16 @@ class ExcelSearchApp:
             }
         )
 
-        # Download Excel
-        excel_bytes = build_batch_excel(df_result)
-        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            label="⬇️ Download Hasil (.xlsx)",
-            data=excel_bytes,
-            file_name=f"batch_result_{timestamp}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
+        if "batch_catalog_bytes" in st.session_state:
+            ts = st.session_state.get("batch_catalog_timestamp", "result")
+            st.download_button(
+                label="⬇️ Download Hasil (.xlsx)",
+                data=st.session_state["batch_catalog_bytes"],
+                file_name=f"catalog_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+            )
 
     # ── SIDEBAR & DASHBOARD ──────────────────────────────────────────────────
     def display_dashboard(self):
