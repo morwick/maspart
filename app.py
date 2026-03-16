@@ -334,21 +334,22 @@ def build_batch_excel(df_result: pd.DataFrame) -> bytes:
 
 def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> bytes:
     """
-    Build catalog Excel: Part Number | Part Name | Kecocokan | Gambar
-    Gambar diambil dari SIMS — gambar ke-2 jika ada, else gambar ke-1.
-    Satu baris per unique Part Number (ditemukan / tidak ditemukan).
+    Build catalog Excel: Part Number | Part Name | Kecocokan | Gambar 1 | Gambar 2
+    Gambar diambil dari SIMS — foto ke-1 di kolom D, foto ke-2 di kolom E.
+    Jika hanya 1 foto, kolom D diisi, kolom E kosong.
+    Satu baris per unique Part Number.
     """
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.drawing.image import Image as XLImage
+    from PIL import Image as PILImage
     import tempfile, os
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Catalog"
 
-    # ── header style ──
     header_fill = PatternFill("solid", fgColor="1565C0")
     header_font = Font(bold=True, color="FFFFFF", name="Arial", size=11)
     center      = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -356,8 +357,8 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
     thin        = Side(style="thin", color="BDBDBD")
     border      = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    headers = ["Part Number", "Part Name", "Kecocokan", "Gambar"]
-    col_widths = [20, 30, 45, 38]
+    headers    = ["Part Number", "Part Name", "Kecocokan", "Gambar 1", "Gambar 2"]
+    col_widths = [20, 30, 45, 38, 38]
     for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=ci, value=h)
         cell.font      = header_font
@@ -371,8 +372,7 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
     fill_odd  = PatternFill("solid", fgColor="FAFAFA")
     fill_nf   = PatternFill("solid", fgColor="FFEBEE")
 
-    # ── kumpulkan 1 baris per PN ──
-    # Kecocokan = semua nilai "Hasil" yang ditemukan, digabung newline
+    # kumpulkan 1 baris per PN
     grouped = {}
     for _, r in df_result.iterrows():
         pn     = r["_pn_group"]
@@ -387,6 +387,23 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
             if not grouped[pn]["Part Name"]:
                 grouped[pn]["Part Name"] = pname
 
+    def _make_xl_image(img_bytes, max_h=200):
+        """Resize gambar dan simpan ke file tmp, return (XLImage, w_px, h_px, tmp_path)."""
+        pil_img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+        w_px, h_px = pil_img.size
+        if h_px > max_h:
+            ratio  = max_h / h_px
+            w_px   = int(w_px * ratio)
+            h_px   = max_h
+            pil_img = pil_img.resize((w_px, h_px), PILImage.LANCZOS)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        pil_img.save(tmp.name, format="PNG")
+        tmp.close()
+        xl = XLImage(tmp.name)
+        xl.width  = w_px
+        xl.height = h_px
+        return xl, w_px, h_px, tmp.name
+
     tmp_files = []
     row_idx   = 2
     total_pn  = len(grouped)
@@ -395,69 +412,63 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
         if progress_callback:
             progress_callback(i, total_pn, pn)
 
-        kecocokan = "\n".join(info["kecocokan_list"]) if info["kecocokan_list"] else "—"
-        is_found  = info["found"]
-        fill      = (fill_even if i % 2 == 0 else fill_odd) if is_found else fill_nf
-
-        # row height default — akan di-override jika ada gambar
+        kecocokan  = "\n".join(info["kecocokan_list"]) if info["kecocokan_list"] else "—"
+        is_found   = info["found"]
+        fill       = (fill_even if i % 2 == 0 else fill_odd) if is_found else fill_nf
         row_height = 80
+        img_d      = None
+        img_e      = None
 
-        # ── fetch gambar SIMS ──
-        img_obj = None
+        # fetch 2 gambar BERBEDA dari SIMS
         if SIMS_ENABLED and is_found:
             try:
-                urls, err = _sims_fetch(pn)
+                import hashlib
+                urls, _ = _sims_fetch(pn)
                 if urls:
-                    pick_url = urls[1] if len(urls) >= 2 else urls[0]
-                    img_bytes, fetch_err = ExcelSearchApp.fetch_image_bytes(pick_url)
-                    if img_bytes:
-                        from PIL import Image as PILImage
-                        pil_img = PILImage.open(io.BytesIO(img_bytes))
-                        # resize agar muat di sel (max 200px tinggi)
-                        MAX_H = 200
-                        w_px, h_px = pil_img.size
-                        if h_px > MAX_H:
-                            ratio  = MAX_H / h_px
-                            w_px   = int(w_px * ratio)
-                            h_px   = MAX_H
-                            pil_img = pil_img.resize((w_px, h_px), PILImage.LANCZOS)
-                        # simpan ke tmp
-                        fmt = "PNG"
-                        suffix = ".png"
-                        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                        pil_img.save(tmp.name, format=fmt)
-                        tmp.close()
-                        tmp_files.append(tmp.name)
-                        img_obj    = XLImage(tmp.name)
-                        img_obj.width  = w_px
-                        img_obj.height = h_px
-                        # row height (pt ≈ pixel * 0.75)
-                        row_height = max(int(h_px * 0.75) + 10, 80)
+                    # foto 1 → kolom D (index 0)
+                    b1, _ = ExcelSearchApp.fetch_image_bytes(urls[0])
+                    if b1:
+                        xl, w, h, tmp_path = _make_xl_image(b1)
+                        img_d = xl
+                        tmp_files.append(tmp_path)
+                        row_height = max(int(h * 0.75) + 10, row_height)
+                        hash1 = hashlib.md5(b1).hexdigest()
+
+                        # foto 2 → cari URL berikutnya yang berbeda hash
+                        for url2 in urls[1:]:
+                            b2, _ = ExcelSearchApp.fetch_image_bytes(url2)
+                            if b2 and hashlib.md5(b2).hexdigest() != hash1:
+                                xl, w, h, tmp_path = _make_xl_image(b2)
+                                img_e = xl
+                                tmp_files.append(tmp_path)
+                                row_height = max(int(h * 0.75) + 10, row_height)
+                                break
             except Exception as e:
                 print(f"[catalog] Gagal ambil gambar {pn}: {e}")
 
         ws.row_dimensions[row_idx].height = row_height
 
         # tulis sel A–C
-        vals = [pn, info["Part Name"], kecocokan]
-        aligns = [center, left, left]
-        for ci, (val, aln) in enumerate(zip(vals, aligns), start=1):
-            cell            = ws.cell(row=row_idx, column=ci, value=val)
-            cell.fill       = fill
-            cell.border     = border
-            cell.alignment  = aln
-            cell.font       = Font(name="Arial", size=10)
+        for ci, (val, aln) in enumerate(
+            [(pn, center), (info["Part Name"], left), (kecocokan, left)], start=1
+        ):
+            cell           = ws.cell(row=row_idx, column=ci, value=val)
+            cell.fill      = fill
+            cell.border    = border
+            cell.alignment = aln
+            cell.font      = Font(name="Arial", size=10)
 
-        # sel D (gambar)
-        dcell            = ws.cell(row=row_idx, column=4, value="")
-        dcell.fill       = fill
-        dcell.border     = border
-        dcell.alignment  = center
+        # sel D dan E (gambar)
+        for ci in (4, 5):
+            c           = ws.cell(row=row_idx, column=ci, value="")
+            c.fill      = fill
+            c.border    = border
+            c.alignment = center
 
-        if img_obj:
-            col_letter = get_column_letter(4)
-            cell_addr  = f"{col_letter}{row_idx}"
-            ws.add_image(img_obj, cell_addr)
+        if img_d:
+            ws.add_image(img_d, f"D{row_idx}")
+        if img_e:
+            ws.add_image(img_e, f"E{row_idx}")
 
         row_idx += 1
 
