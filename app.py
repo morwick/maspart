@@ -59,6 +59,44 @@ def inject_keep_alive():
     # Inject via st.markdown agar tidak butuh iframe
     st.markdown(KEEP_ALIVE_JS, unsafe_allow_html=True)
 
+TAB_PERSIST_JS = """
+<script>
+(function() {
+    const KEY = 'pnf_active_tab';
+    function attachListeners() {
+        document.querySelectorAll('[data-baseweb="tab"]').forEach(function(tab, idx) {
+            if (!tab._pnf_listener) {
+                tab._pnf_listener = true;
+                tab.addEventListener('click', function() {
+                    sessionStorage.setItem(KEY, idx);
+                });
+            }
+        });
+    }
+    function restoreTab() {
+        var saved = sessionStorage.getItem(KEY);
+        if (saved === null) return;
+        var idx = parseInt(saved);
+        var tabs = document.querySelectorAll('[data-baseweb="tab"]');
+        if (tabs.length > idx && tabs[idx].getAttribute('aria-selected') !== 'true') {
+            tabs[idx].click();
+        }
+    }
+    var _lastTabCount = 0;
+    var observer = new MutationObserver(function() {
+        var tabs = document.querySelectorAll('[data-baseweb="tab"]');
+        if (tabs.length !== _lastTabCount) {
+            _lastTabCount = tabs.length;
+            attachListeners();
+            setTimeout(restoreTab, 50);
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    setTimeout(function() { attachListeners(); restoreTab(); }, 400);
+})();
+</script>
+"""
+
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
@@ -519,6 +557,7 @@ class ExcelSearchApp:
         self.stok_cache      = None
         self.threshold_file  = DATA_FOLDER / "stok" / "threshold.xlsx"
         self.threshold_cache = None
+        self.populasi_folder = DATA_FOLDER / "populasi"
         self._load_stok_data()
         self._load_threshold_data()
 
@@ -1079,17 +1118,18 @@ class ExcelSearchApp:
                 """)
 
         # ── TABS ──
+        st.markdown(TAB_PERSIST_JS, unsafe_allow_html=True)
         st.markdown('<div class="search-box">', unsafe_allow_html=True)
         st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
 
         if role == "admin":
-            tab1, tab2, tab3, tab4 = st.tabs([
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
-                "⚠️ Threshold", "📥 Batch Download"])
+                "⚠️ Threshold", "📥 Batch Download", "🚛 Populasi Unit"])
         else:
-            tab1, tab2, tab4 = st.tabs([
+            tab1, tab2, tab4, tab5 = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
-                "📥 Batch Download"])
+                "📥 Batch Download", "🚛 Populasi Unit"])
             tab3 = None
 
         with tab1:
@@ -1140,6 +1180,9 @@ class ExcelSearchApp:
 
         with tab4:
             self.render_batch_download_tab()
+
+        with tab5:
+            self.render_populasi_tab()
 
         st.markdown("</div>", unsafe_allow_html=True)
         self.display_search_results()
@@ -1382,6 +1425,109 @@ class ExcelSearchApp:
                             st.warning(f"⚠️ SIMS: {sims_err}")
                         else:
                             st.caption("📷 Tidak ada gambar di SIMS untuk part ini")
+
+    def _load_populasi_data(self):
+        """Baca semua file Excel dari folder data/populasi/ dan gabungkan."""
+        if "populasi_df" in st.session_state:
+            return st.session_state.populasi_df
+        excel_ext = (".xlsx", ".xls", ".xlsm")
+        frames = []
+        if self.populasi_folder.exists():
+            for fp in sorted(self.populasi_folder.iterdir()):
+                if fp.suffix.lower() not in excel_ext:
+                    continue
+                try:
+                    with open(fp, "rb") as f:
+                        file_bytes = io.BytesIO(f.read())
+                    xl = pd.ExcelFile(file_bytes, engine="openpyxl")
+                    for sheet in xl.sheet_names:
+                        df = pd.read_excel(xl, sheet_name=sheet, dtype=str)
+                        df.columns = [str(c).strip() for c in df.columns]
+                        df["_source_file"]  = fp.name
+                        df["_source_sheet"] = sheet
+                        frames.append(df)
+                except Exception as e:
+                    st.warning(f"Gagal membaca {fp.name}: {e}")
+        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        st.session_state.populasi_df = combined
+        return combined
+
+    def render_populasi_tab(self):
+        st.markdown("### Populasi Unit")
+
+        col_r, _ = st.columns([1, 5])
+        with col_r:
+            if st.button("Refresh Data Populasi", key="refresh_populasi"):
+                st.session_state.pop("populasi_df", None)
+                # Tidak st.rerun() — biarkan Streamlit re-render alami
+
+        df = self._load_populasi_data()
+
+        if df.empty:
+            st.warning("Tidak ada file Excel di folder data/populasi/. Pastikan file populasi sudah ditempatkan di folder tersebut.")
+            return
+
+        display_cols = [c for c in df.columns if not c.startswith("_source")]
+        df_display   = df[display_cols].copy()
+
+        with st.expander("Filter & Pencarian", expanded=True):
+            search_col, filter_area = st.columns([2, 3])
+            with search_col:
+                keyword = st.text_input(
+                    "Cari (semua kolom):", placeholder="Ketik kata kunci",
+                    key="pop_keyword",
+                    value=st.session_state.get("pop_keyword_val", ""),
+                )
+                st.session_state["pop_keyword_val"] = keyword
+            with filter_area:
+                fcols = st.columns(2)
+                filter_vals = {}
+                candidate_filters = ["MODEL", "JENIS", "TIPE UNIT", "LOKASI KERJA", "TAHUN", "Euro"]
+                available_filters = [c for c in candidate_filters if c in df_display.columns][:4]
+                for i, col in enumerate(available_filters):
+                    with fcols[i % 2]:
+                        options = ["Semua"] + sorted(df_display[col].dropna().unique().tolist())
+                        sk = f"pop_filter_{col}"
+                        saved = st.session_state.get(sk, "Semua")
+                        if saved not in options:
+                            saved = "Semua"
+                        filter_vals[col] = st.selectbox(
+                            col, options,
+                            index=options.index(saved),
+                            key=sk,
+                        )
+
+        mask = pd.Series([True] * len(df_display), index=df_display.index)
+        if keyword.strip():
+            kw = keyword.strip().upper()
+            kw_mask = pd.Series([False] * len(df_display), index=df_display.index)
+            for col in df_display.columns:
+                kw_mask |= df_display[col].astype(str).str.upper().str.contains(kw, na=False)
+            mask &= kw_mask
+        for col, val in filter_vals.items():
+            if val != "Semua":
+                mask &= (df_display[col].astype(str) == val)
+
+        df_filtered = df_display[mask].reset_index(drop=True)
+
+        st.metric("Total Unit", len(df_display))
+        st.markdown("---")
+
+        if df_filtered.empty:
+            st.info("Tidak ada data yang cocok dengan filter.")
+        else:
+            df_show = df_filtered.rename(columns=lambda c: c.strip())
+            st.dataframe(df_show, hide_index=True, use_container_width=True, height=500)
+            dl_buf = io.BytesIO()
+            df_show.to_excel(dl_buf, index=False, engine="openpyxl")
+            dl_buf.seek(0)
+            st.download_button(
+                label="Download Excel",
+                data=dl_buf.getvalue(),
+                file_name=f"populasi_unit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="pop_download",
+            )
 
     def run(self):
         self.display_dashboard()
