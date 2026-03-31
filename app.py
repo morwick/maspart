@@ -1510,7 +1510,9 @@ class ExcelSearchApp:
 
         df_filtered = df_display[mask].reset_index(drop=True)
 
-        st.metric("Total Unit", len(df_display))
+        c1, c2 = st.columns(2)
+        c1.metric("Total Unit", len(df_display))
+        c2.metric("Hasil Filter", len(df_filtered))
         st.markdown("---")
 
         if df_filtered.empty:
