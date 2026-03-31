@@ -617,11 +617,35 @@ class ExcelSearchApp:
         base = self.normalize_base_part_number(pn)
         if not base:
             return None
+        # Cek subfolder: images/PARTNUMBER/foto.jpg (format baru dari admin upload)
+        sub_folder = self.images_folder / base
+        if sub_folder.exists() and sub_folder.is_dir():
+            for ext in self.supported_ext:
+                candidates = sorted(sub_folder.glob(f"*{ext}"))
+                if candidates:
+                    return candidates[0]
+        # Fallback ke file langsung: images/PARTNUMBER.jpg (format lama)
         for ext in self.supported_ext:
             p = self.images_folder / f"{base}{ext}"
             if p.exists():
                 return p
         return None
+
+    def get_all_image_paths(self, pn):
+        """Return semua path gambar lokal untuk suatu part number (subfolder + file langsung)."""
+        base = self.normalize_base_part_number(pn)
+        if not base:
+            return []
+        paths = []
+        sub_folder = self.images_folder / base
+        if sub_folder.exists() and sub_folder.is_dir():
+            for ext in self.supported_ext:
+                paths.extend(sorted(sub_folder.glob(f"*{ext}")))
+        for ext in self.supported_ext:
+            p = self.images_folder / f"{base}{ext}"
+            if p.exists() and p not in paths:
+                paths.append(p)
+        return paths
 
     @staticmethod
     def render_zoomable_image(img_bytes: bytes, caption: str = "", zoom_key: str = "zoom_default"):
@@ -1123,14 +1147,15 @@ class ExcelSearchApp:
         st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
 
         if role == "admin":
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            tab1, tab2, tab4, tab5, tab_admin_img = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
-                "⚠️ Threshold", "📥 Batch Download", "🚛 Populasi Unit"])
+                "📥 Batch Download", "🚛 Populasi Unit", "🖼️ Kelola Foto"])
         else:
             tab1, tab2, tab4, tab5 = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
                 "📥 Batch Download", "🚛 Populasi Unit"])
-            tab3 = None
+            tab_admin_img = None
+        tab3 = None
 
         with tab1:
             with st.form(key="search_pn_form", clear_on_submit=False):
@@ -1160,23 +1185,9 @@ class ExcelSearchApp:
                     else:
                         st.warning("Masukkan nama part untuk mencari.")
 
-        if tab3 is not None:
-            with tab3:
-                st.markdown("**Part yang stoknya di bawah threshold minimal:**")
-                st.markdown("---")
-                threshold_results = self.get_threshold_alerts()
-                if threshold_results:
-                    st.markdown(f"**🚨 {len(threshold_results)} part memerlukan perhatian:**")
-                    st.dataframe(pd.DataFrame(threshold_results), hide_index=True,
-                                 column_config={
-                                     "Part Number":   st.column_config.TextColumn(width="medium"),
-                                     "Part Name":     st.column_config.TextColumn(width="large"),
-                                     "Stok Saat Ini": st.column_config.NumberColumn(width="small"),
-                                     "Minimal Stok":  st.column_config.NumberColumn(width="small"),
-                                     "Qty":           st.column_config.NumberColumn(width="small"),
-                                 })
-                else:
-                    st.success("✅ Semua part memiliki stok mencukupi!")
+        if tab_admin_img is not None:
+            with tab_admin_img:
+                self.render_admin_image_tab()
 
         with tab4:
             self.render_batch_download_tab()
@@ -1310,10 +1321,39 @@ class ExcelSearchApp:
                                             st.rerun()
 
                         elif img_path:
+                            local_paths = self.get_all_image_paths(pn)
+                            if not local_paths:
+                                local_paths = [img_path]
+                            local_idx_key = f"local_img_idx_{pn}"
+                            if local_idx_key not in st.session_state:
+                                st.session_state[local_idx_key] = 0
+                            local_total = len(local_paths)
+                            local_cur   = min(st.session_state[local_idx_key], local_total - 1)
+                            if local_total > 1:
+                                col_p, col_i, col_n = st.columns([1, 3, 1])
+                                with col_p:
+                                    if st.button("◀ Prev", key=f"loc_prev_{pn}", disabled=(local_cur == 0)):
+                                        st.session_state[local_idx_key] = max(0, local_cur - 1)
+                                        st.rerun()
+                                with col_i:
+                                    st.markdown(f"<div style='text-align:center;padding:6px 0;font-weight:600;color:#1565C0;'>Foto {local_cur+1} / {local_total}</div>", unsafe_allow_html=True)
+                                with col_n:
+                                    if st.button("Next ▶", key=f"loc_next_{pn}", disabled=(local_cur == local_total - 1)):
+                                        st.session_state[local_idx_key] = min(local_total - 1, local_cur + 1)
+                                        st.rerun()
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                img_data = img_path.read_bytes()
-                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex}", zoom_key=f"{pn}_local")
+                                img_data = local_paths[local_cur].read_bytes()
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{pn} - {pname_ex} (Foto {local_cur+1}/{local_total})", zoom_key=f"{pn}_local_{local_cur}")
+                            if local_total > 1:
+                                st.markdown("**Pilih foto:**")
+                                thumb_cols = st.columns(min(local_total, 5))
+                                for ti, (tc, lp) in enumerate(zip(thumb_cols, local_paths)):
+                                    with tc:
+                                        lbl = f"{'✅' if ti == local_cur else '🔲'} {ti+1}"
+                                        if st.button(lbl, key=f"loc_thumb_{pn}_{ti}"):
+                                            st.session_state[local_idx_key] = ti
+                                            st.rerun()
                         else:
                             if SIMS_ENABLED and st.session_state.get(f"sims_fetched_{pn}") is not None:
                                 st.caption("📷 Tidak ada gambar di SIMS untuk part ini")
@@ -1415,10 +1455,39 @@ class ExcelSearchApp:
                                             st.rerun()
 
                         elif img_path:
+                            local_paths_nf = self.get_all_image_paths(search_term)
+                            if not local_paths_nf:
+                                local_paths_nf = [img_path]
+                            nf_local_idx_key = f"local_img_idx_{search_term}"
+                            if nf_local_idx_key not in st.session_state:
+                                st.session_state[nf_local_idx_key] = 0
+                            nf_total = len(local_paths_nf)
+                            nf_cur   = min(st.session_state[nf_local_idx_key], nf_total - 1)
+                            if nf_total > 1:
+                                col_p, col_i, col_n = st.columns([1, 3, 1])
+                                with col_p:
+                                    if st.button("◀ Prev", key=f"nf_loc_prev_{search_term}", disabled=(nf_cur == 0)):
+                                        st.session_state[nf_local_idx_key] = max(0, nf_cur - 1)
+                                        st.rerun()
+                                with col_i:
+                                    st.markdown(f"<div style='text-align:center;padding:6px 0;font-weight:600;color:#1565C0;'>Foto {nf_cur+1} / {nf_total}</div>", unsafe_allow_html=True)
+                                with col_n:
+                                    if st.button("Next ▶", key=f"nf_loc_next_{search_term}", disabled=(nf_cur == nf_total - 1)):
+                                        st.session_state[nf_local_idx_key] = min(nf_total - 1, nf_cur + 1)
+                                        st.rerun()
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
-                                img_data = img_path.read_bytes()
-                                ExcelSearchApp.render_zoomable_image(img_data, caption=search_term, zoom_key=f"nf_{search_term}_local")
+                                img_data = local_paths_nf[nf_cur].read_bytes()
+                                ExcelSearchApp.render_zoomable_image(img_data, caption=f"{search_term} (Foto {nf_cur+1}/{nf_total})", zoom_key=f"nf_{search_term}_local_{nf_cur}")
+                            if nf_total > 1:
+                                st.markdown("**Pilih foto:**")
+                                thumb_cols = st.columns(min(nf_total, 5))
+                                for ti, (tc, lp) in enumerate(zip(thumb_cols, local_paths_nf)):
+                                    with tc:
+                                        lbl = f"{'✅' if ti == nf_cur else '🔲'} {ti+1}"
+                                        if st.button(lbl, key=f"nf_loc_thumb_{search_term}_{ti}"):
+                                            st.session_state[nf_local_idx_key] = ti
+                                            st.rerun()
                     else:
                         sims_err = st.session_state.get(sims_err_key)
                         if sims_err:
@@ -1451,6 +1520,139 @@ class ExcelSearchApp:
         combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         st.session_state.populasi_df = combined
         return combined
+
+    def render_admin_image_tab(self):
+        """Tab khusus admin: upload & kelola foto manual untuk part yang tidak ada di SIMS."""
+        st.markdown("### 🖼️ Kelola Foto Part (Manual)")
+        st.markdown(
+            "Upload foto untuk part yang tidak memiliki gambar di SIMS. "
+            "Foto disimpan di folder `images/` dan akan otomatis ditampilkan saat pencarian."
+        )
+        st.markdown("---")
+
+        # ── Upload Foto Baru ──────────────────────────────────────────────
+        st.markdown("#### ➕ Upload Foto Baru")
+        col_pn, col_up = st.columns([1, 2])
+        with col_pn:
+            part_input = st.text_input(
+                "Part Number:",
+                placeholder="Contoh: WG9925520270",
+                key="admin_img_pn_input",
+            ).strip().upper()
+        with col_up:
+            uploaded_files = st.file_uploader(
+                "Pilih file foto (JPG / PNG):",
+                type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                key="admin_img_uploader",
+            )
+
+        if st.button("💾 Simpan Foto", type="primary", key="admin_img_save_btn"):
+            if not part_input:
+                st.warning("⚠️ Masukkan Part Number terlebih dahulu.")
+            elif not uploaded_files:
+                st.warning("⚠️ Pilih minimal satu file foto.")
+            else:
+                saved, skipped = [], []
+                part_folder = self.images_folder / part_input
+                part_folder.mkdir(parents=True, exist_ok=True)
+                for uf in uploaded_files:
+                    dest = part_folder / uf.name
+                    if dest.exists():
+                        skipped.append(uf.name)
+                    else:
+                        dest.write_bytes(uf.read())
+                        saved.append(uf.name)
+                if saved:
+                    st.success(f"✅ {len(saved)} foto berhasil disimpan untuk **{part_input}**: {', '.join(saved)}")
+                if skipped:
+                    st.info(f"ℹ️ {len(skipped)} file dilewati (sudah ada): {', '.join(skipped)}")
+
+        st.markdown("---")
+
+        # ── Daftar Foto yang Sudah Ada ────────────────────────────────────
+        st.markdown("#### 📂 Foto yang Sudah Ada")
+
+        # Kumpulkan semua folder/part yang punya foto lokal
+        img_ext = {".jpg", ".jpeg", ".png"}
+        part_folders = sorted([
+            p for p in self.images_folder.iterdir()
+            if p.is_dir() and any(f.suffix.lower() in img_ext for f in p.iterdir())
+        ])
+
+        # Juga cek file langsung di images/ (format lama: PARTNUMBER.jpg)
+        direct_files = sorted([
+            f for f in self.images_folder.iterdir()
+            if f.is_file() and f.suffix.lower() in img_ext
+        ])
+
+        total_parts = len(part_folders) + len(direct_files)
+        if total_parts == 0:
+            st.info("Belum ada foto manual yang tersimpan di folder `images/`.")
+        else:
+            st.caption(f"Ditemukan foto untuk **{total_parts}** part.")
+
+            # Filter pencarian
+            search_pn = st.text_input(
+                "🔍 Filter Part Number:", placeholder="Ketik untuk filter",
+                key="admin_img_filter"
+            ).strip().upper()
+
+            # Tampilkan per-folder (subfolder)
+            for pf in part_folders:
+                pn_name = pf.name.upper()
+                if search_pn and search_pn not in pn_name:
+                    continue
+                files_in = sorted([f for f in pf.iterdir() if f.suffix.lower() in img_ext])
+                with st.expander(f"📁 {pn_name}  ({len(files_in)} foto)", expanded=False):
+                    cols_per_row = 3
+                    rows = [files_in[i:i+cols_per_row] for i in range(0, len(files_in), cols_per_row)]
+                    for row_files in rows:
+                        img_cols = st.columns(cols_per_row)
+                        for col, fpath in zip(img_cols, row_files):
+                            with col:
+                                try:
+                                    st.image(fpath.read_bytes(), caption=fpath.name, use_container_width=True)
+                                except Exception:
+                                    st.caption(f"⚠️ {fpath.name} (gagal dimuat)")
+                                if st.button(
+                                    f"🗑️ Hapus", key=f"del_{pn_name}_{fpath.name}",
+                                    help=f"Hapus {fpath.name}"
+                                ):
+                                    try:
+                                        fpath.unlink()
+                                        st.toast(f"✅ {fpath.name} dihapus.")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Gagal hapus: {e}")
+                    # Hapus folder jika sudah kosong setelah hapus file
+                    remaining = [f for f in pf.iterdir() if f.suffix.lower() in img_ext]
+                    if not remaining:
+                        try:
+                            pf.rmdir()
+                        except Exception:
+                            pass
+
+            # Tampilkan file langsung di images/ (format lama)
+            for fpath in direct_files:
+                pn_name = fpath.stem.upper()
+                if search_pn and search_pn not in pn_name:
+                    continue
+                with st.expander(f"🖼️ {pn_name}  (1 foto — format lama)", expanded=False):
+                    col_img, col_act = st.columns([2, 1])
+                    with col_img:
+                        try:
+                            st.image(fpath.read_bytes(), caption=fpath.name, use_container_width=True)
+                        except Exception:
+                            st.caption(f"⚠️ {fpath.name} (gagal dimuat)")
+                    with col_act:
+                        if st.button("🗑️ Hapus", key=f"del_direct_{fpath.name}"):
+                            try:
+                                fpath.unlink()
+                                st.toast(f"✅ {fpath.name} dihapus.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Gagal hapus: {e}")
 
     def render_populasi_tab(self):
         st.markdown("### Populasi Unit")
