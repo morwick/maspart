@@ -1,5 +1,5 @@
 """
-EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM + THRESHOLD + BATCH DOWNLOAD
+EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM + THRESHOLD + BATCH DOWNLOAD + EDIT POPULASI (GitHub Sync)
 =============================================================
 """
 
@@ -20,6 +20,130 @@ import requests
 
 
 warnings.filterwarnings('ignore')
+
+# ── GitHub Integration ──────────────────────────────────────────────
+def _github_cfg():
+    """Ambil konfigurasi GitHub dari st.secrets."""
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo  = st.secrets["GITHUB_REPO"]          # format: "owner/repo"
+        branch = st.secrets.get("GITHUB_BRANCH", "main")
+        return token, repo, branch
+    except Exception:
+        return None, f"HTTP {r.status_code} — {r.text[:200]}", None
+
+def _github_get_file(repo, branch, path, token):
+    """GET file dari GitHub API — return (content_bytes, sha) atau (None, None)."""
+    url  = f"https://api.github.com/repos/{repo}/contents/{path}"
+    hdrs = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    r    = requests.get(url, headers=hdrs, params={"ref": branch}, timeout=20)
+    if r.status_code == 200:
+        data = r.json()
+        import base64 as _b64
+        return _b64.b64decode(data["content"]), data["sha"]
+    return None, f"HTTP {r.status_code} — {r.text[:200]}"
+
+def _github_push_file(repo, branch, path, content_bytes, sha, token, commit_msg):
+    """PUT (update) file ke GitHub — return (True, None) atau (False, error_str)."""
+    import base64 as _b64
+    url  = f"https://api.github.com/repos/{repo}/contents/{path}"
+    hdrs = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    body = {
+        "message": commit_msg,
+        "content": _b64.b64encode(content_bytes).decode(),
+        "branch":  branch,
+    }
+    if sha:
+        body["sha"] = sha
+    r = requests.put(url, headers=hdrs, json=body, timeout=30)
+    if r.status_code in (200, 201):
+        return True, None
+    return False, f"HTTP {r.status_code}: {r.json().get('message','Unknown error')}"
+
+def _github_path_for_populasi(filename):
+    """Konversi nama file lokal ke path relatif di GitHub (data/...)."""
+    return f"data/populasi/{filename}"
+
+def save_populasi_to_github(df_updated: pd.DataFrame, source_file: str, source_sheet: str, user: str) -> tuple:
+    """
+    Simpan df_updated ke file Excel di GitHub.
+    Hanya baris dengan _source_file == source_file dan _source_sheet == source_sheet yang diubah.
+    Return (True, None) atau (False, error_msg).
+    """
+    token, repo, branch = _github_cfg()
+    if not token:
+        return False, "GitHub credentials belum dikonfigurasi di st.secrets.\nTambahkan GITHUB_TOKEN, GITHUB_REPO, dan GITHUB_BRANCH."
+
+    gh_path = _github_path_for_populasi(source_file)
+
+    # Ambil file saat ini dari GitHub untuk mendapatkan SHA
+    current_bytes, sha = _github_get_file(repo, branch, gh_path, token)
+    if current_bytes is None:
+        return False, f"Gagal akses GitHub\nRepo: {repo}\nPath: {gh_path}\nDetail: {sha}"
+
+    # Baca file Excel existing dari GitHub
+    try:
+        xl_existing = pd.ExcelFile(io.BytesIO(current_bytes), engine="openpyxl")
+    except Exception as e:
+        return False, f"Gagal membaca file Excel dari GitHub: {e}"
+
+    # Tulis ulang semua sheet, dengan sheet target di-update
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(current_bytes))
+
+    if source_sheet not in wb.sheetnames:
+        return False, f"Sheet '{source_sheet}' tidak ditemukan dalam file '{source_file}'."
+
+    ws = wb[source_sheet]
+
+    # Ambil kolom dari header baris pertama
+    header_row = [cell.value for cell in ws[1]]
+
+    # Filter df_updated hanya untuk source_file + source_sheet ini
+    mask = (
+        (df_updated["_source_file"]  == source_file) &
+        (df_updated["_source_sheet"] == source_sheet)
+    )
+    df_sheet = df_updated[mask].copy()
+
+    # Hapus kolom internal
+    display_cols = [c for c in df_sheet.columns if not c.startswith("_source")]
+    df_sheet = df_sheet[display_cols].reset_index(drop=True)
+
+    # Update baris data di worksheet (mulai baris 2, baris 1 adalah header)
+    for row_idx, (_, data_row) in enumerate(df_sheet.iterrows(), start=2):
+        for col_idx, col_name in enumerate(header_row, start=1):
+            if col_name in df_sheet.columns:
+                val = data_row.get(col_name, None)
+                # Konversi NaN ke None agar cell kosong
+                if pd.isna(val) if not isinstance(val, str) else False:
+                    val = None
+                ws.cell(row=row_idx, column=col_idx, value=val)
+
+    # Hapus baris sisa jika jumlah baris berkurang
+    last_data_row = len(df_sheet) + 1
+    while ws.max_row > last_data_row:
+        ws.delete_rows(ws.max_row)
+
+    # Simpan ke bytes
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    new_bytes = buf.getvalue()
+
+    # Push ke GitHub
+    commit_msg = f"[Admin] Edit populasi unit '{source_file}' sheet '{source_sheet}' oleh {user} — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    ok, err = _github_push_file(repo, branch, gh_path, new_bytes, sha, token, commit_msg)
+    if ok:
+        # Update file lokal juga agar sinkron
+        local_path = DATA_FOLDER / "populasi" / source_file
+        try:
+            local_path.write_bytes(new_bytes)
+        except Exception:
+            pass
+        return True, None
+    return False, err
+
 
 # ── SIMS Image Fetcher ─────────────────────────────────────────────
 try:
@@ -1655,13 +1779,18 @@ class ExcelSearchApp:
                                 st.error(f"Gagal hapus: {e}")
 
     def render_populasi_tab(self):
-        st.markdown("### Populasi Unit")
+        user = LoginManager.get_current_user()
+        role = user["role"] if user else "user"
+        is_admin = (role == "admin")
 
-        col_r, _ = st.columns([1, 5])
+        st.markdown("### 🚛 Populasi Unit")
+
+        col_r, col_mode, _ = st.columns([1, 2, 3])
         with col_r:
-            if st.button("Refresh Data Populasi", key="refresh_populasi"):
+            if st.button("🔄 Refresh", key="refresh_populasi"):
                 st.session_state.pop("populasi_df", None)
-                # Tidak st.rerun() — biarkan Streamlit re-render alami
+                st.session_state.pop("pop_edit_mode", None)
+                st.rerun()
 
         df = self._load_populasi_data()
 
@@ -1672,7 +1801,101 @@ class ExcelSearchApp:
         display_cols = [c for c in df.columns if not c.startswith("_source")]
         df_display   = df[display_cols].copy()
 
-        with st.expander("Filter & Pencarian", expanded=True):
+        # ── Mode Toggle (Admin only) ─────────────────────────────────
+        edit_mode = False
+        if is_admin:
+            with col_mode:
+                edit_mode = st.toggle(
+                    "✏️ Mode Edit",
+                    value=st.session_state.get("pop_edit_mode", False),
+                    key="pop_edit_toggle",
+                    help="Aktifkan untuk mengedit data populasi dan menyimpan ke GitHub",
+                )
+                st.session_state["pop_edit_mode"] = edit_mode
+
+        # ── EDIT MODE (Admin) ────────────────────────────────────────
+        if is_admin and edit_mode:
+            st.info("✏️ **Mode Edit Aktif** — Pilih file & sheet, edit data, lalu klik Simpan ke GitHub.", icon="ℹ️")
+
+            # Pilih file sumber
+            source_files  = sorted(df["_source_file"].dropna().unique().tolist())
+            sel_file = st.selectbox("📁 Pilih File Populasi:", source_files, key="pop_edit_file")
+
+            # Pilih sheet dari file tersebut
+            source_sheets = sorted(df[df["_source_file"] == sel_file]["_source_sheet"].dropna().unique().tolist())
+            sel_sheet = st.selectbox("📋 Pilih Sheet:", source_sheets, key="pop_edit_sheet")
+
+            # Filter data untuk file+sheet yang dipilih
+            mask_edit = (df["_source_file"] == sel_file) & (df["_source_sheet"] == sel_sheet)
+            df_edit_raw = df[mask_edit][display_cols].copy().reset_index(drop=True)
+
+            st.caption(f"📊 {len(df_edit_raw)} baris ditemukan di `{sel_file}` → sheet `{sel_sheet}`")
+
+            # ── Data Editor ──
+            st.markdown("#### 📝 Edit Data")
+            st.markdown(
+                "<small>Klik sel untuk mengedit. Gunakan tombol ➕ untuk tambah baris baru.</small>",
+                unsafe_allow_html=True,
+            )
+
+            edited_df = st.data_editor(
+                df_edit_raw,
+                use_container_width=True,
+                num_rows="dynamic",
+                height=500,
+                key=f"pop_data_editor_{sel_file}_{sel_sheet}",
+            )
+
+            st.markdown("---")
+            col_save, col_cancel = st.columns([1, 1])
+
+            with col_save:
+                if st.button("💾 Simpan ke GitHub", type="primary", use_container_width=True, key="pop_save_github"):
+                    # Gabungkan perubahan: update baris untuk file+sheet ini, biarkan sisanya
+                    df_others = df[~mask_edit].copy()
+
+                    # Tambahkan kolom _source kembali ke edited_df
+                    edited_df_with_src = edited_df.copy()
+                    edited_df_with_src["_source_file"]  = sel_file
+                    edited_df_with_src["_source_sheet"] = sel_sheet
+
+                    df_full_updated = pd.concat([df_others, edited_df_with_src], ignore_index=True)
+
+                    with st.spinner("⏳ Menyimpan ke GitHub..."):
+                        ok, err = save_populasi_to_github(
+                            df_full_updated, sel_file, sel_sheet,
+                            user["username"]
+                        )
+
+                    if ok:
+                        st.success(f"✅ Berhasil disimpan ke GitHub!\nFile: `{sel_file}` | Sheet: `{sel_sheet}`")
+                        # Invalidate cache populasi agar data terbaru dimuat
+                        st.session_state.pop("populasi_df", None)
+                        st.session_state["pop_edit_mode"] = False
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Gagal menyimpan:\n{err}")
+
+            with col_cancel:
+                if st.button("↩️ Batal", use_container_width=True, key="pop_cancel_edit"):
+                    st.session_state["pop_edit_mode"] = False
+                    st.rerun()
+
+            # Download hasil edit sebagai Excel lokal (preview sebelum push)
+            dl_buf = io.BytesIO()
+            edited_df.to_excel(dl_buf, index=False, engine="openpyxl")
+            dl_buf.seek(0)
+            st.download_button(
+                label="⬇️ Download Preview Edit (.xlsx)",
+                data=dl_buf.getvalue(),
+                file_name=f"preview_edit_{sel_file}_{sel_sheet}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="pop_preview_dl",
+            )
+            return  # stop di sini saat mode edit, tidak tampilkan tabel filter
+
+        # ── VIEW MODE (semua user) ───────────────────────────────────
+        with st.expander("🔍 Filter & Pencarian", expanded=True):
             search_col, filter_area = st.columns([2, 3])
             with search_col:
                 keyword = st.text_input(
@@ -1726,7 +1949,7 @@ class ExcelSearchApp:
             df_show.to_excel(dl_buf, index=False, engine="openpyxl")
             dl_buf.seek(0)
             st.download_button(
-                label="Download Excel",
+                label="⬇️ Download Excel",
                 data=dl_buf.getvalue(),
                 file_name=f"populasi_unit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
