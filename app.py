@@ -989,11 +989,13 @@ class ExcelSearchApp:
         return results
 
     def auto_load_excel_files(self):
+        EXCLUDE_SUBFOLDERS = {"populasi", "stok", "login"}
         try:
             self.create_data_folder()
             excel_ext = (".xlsx", ".xls", ".xlsm")
             all_files = []
-            for root, _, files in os.walk(self.data_folder):
+            for root, dirs, files in os.walk(self.data_folder):
+                dirs[:] = [d for d in dirs if d.lower() not in EXCLUDE_SUBFOLDERS]
                 for f in files:
                     if f.lower().endswith(excel_ext):
                         fp = Path(root) / f
