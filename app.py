@@ -29,8 +29,8 @@ def _github_cfg():
         repo  = st.secrets["GITHUB_REPO"]          # format: "owner/repo"
         branch = st.secrets.get("GITHUB_BRANCH", "main")
         return token, repo, branch
-    except Exception:
-        return None, f"HTTP {r.status_code} — {r.text[:200]}", None
+    except Exception as e:
+        return None, None, None
 
 def _github_get_file(repo, branch, path, token):
     """GET file dari GitHub API — return (content_bytes, sha) atau (None, None)."""
@@ -989,13 +989,11 @@ class ExcelSearchApp:
         return results
 
     def auto_load_excel_files(self):
-        EXCLUDE_SUBFOLDERS = {"populasi", "stok", "login"}
         try:
             self.create_data_folder()
             excel_ext = (".xlsx", ".xls", ".xlsm")
             all_files = []
-            for root, dirs, files in os.walk(self.data_folder):
-                dirs[:] = [d for d in dirs if d.lower() not in EXCLUDE_SUBFOLDERS]
+            for root, _, files in os.walk(self.data_folder):
                 for f in files:
                     if f.lower().endswith(excel_ext):
                         fp = Path(root) / f
