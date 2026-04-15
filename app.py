@@ -21,15 +21,81 @@ import requests
 
 warnings.filterwarnings('ignore')
 
+# ── Sinonim Loader ──────────────────────────────────────────────────
+SINONIM_FILE = Path("data/sinonim/sinonim.json")
+
+def load_synonym_map() -> list:
+    """
+    Muat kamus sinonim dari data/sinonim/sinonim.json.
+    Return list of dict: [{triggers: [...], keywords: [...]}, ...]
+    Di-cache di session_state agar tidak dibaca ulang setiap request.
+    """
+    cache_key = "_synonym_map_cache"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+
+    if not SINONIM_FILE.exists():
+        st.session_state[cache_key] = []
+        return []
+
+    try:
+        with open(SINONIM_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Validasi struktur
+        result = []
+        for item in data:
+            if "triggers" in item and "keywords" in item:
+                result.append({
+                    "grup"    : item.get("grup", ""),
+                    "triggers": [str(t).lower().strip() for t in item["triggers"]],
+                    "keywords": [str(k).strip() for k in item["keywords"]],
+                })
+        st.session_state[cache_key] = result
+        return result
+    except Exception as e:
+        st.warning(f"⚠️ Gagal membaca sinonim.json: {e}")
+        st.session_state[cache_key] = []
+        return []
+
+
+def apply_synonyms(term: str) -> list:
+    """
+    Kembalikan list keyword pencarian berdasarkan sinonim dari file JSON.
+    Selalu include term asli + semua sinonim yang cocok.
+    """
+    term_lower = term.strip().lower()
+    keywords   = [term_lower]
+
+    synonym_map = load_synonym_map()
+    for group in synonym_map:
+        triggers = group["triggers"]
+        matched  = any(
+            term_lower in trigger or trigger in term_lower
+            for trigger in triggers
+        )
+        if matched:
+            keywords.extend(group["keywords"])
+
+    # Hapus duplikat, pertahankan urutan
+    seen   = set()
+    result = []
+    for k in keywords:
+        k_lower = k.lower()
+        if k_lower not in seen:
+            seen.add(k_lower)
+            result.append(k)
+    return result
+
+
 # ── GitHub Integration ──────────────────────────────────────────────
 def _github_cfg():
     """Ambil konfigurasi GitHub dari st.secrets."""
     try:
-        token = st.secrets["GITHUB_TOKEN"]
-        repo  = st.secrets["GITHUB_REPO"]          # format: "owner/repo"
+        token  = st.secrets["GITHUB_TOKEN"]
+        repo   = st.secrets["GITHUB_REPO"]          # format: "owner/repo"
         branch = st.secrets.get("GITHUB_BRANCH", "main")
         return token, repo, branch
-    except Exception as e:
+    except Exception:
         return None, None, None
 
 def _github_get_file(repo, branch, path, token):
@@ -83,7 +149,7 @@ def save_populasi_to_github(df_updated: pd.DataFrame, source_file: str, source_s
 
     # Baca file Excel existing dari GitHub
     try:
-        xl_existing = pd.ExcelFile(io.BytesIO(current_bytes), engine="openpyxl")
+        pd.ExcelFile(io.BytesIO(current_bytes), engine="openpyxl")
     except Exception as e:
         return False, f"Gagal membaca file Excel dari GitHub: {e}"
 
@@ -180,7 +246,6 @@ KEEP_ALIVE_JS = """
 """
 
 def inject_keep_alive():
-    # Inject via st.markdown agar tidak butuh iframe
     st.markdown(KEEP_ALIVE_JS, unsafe_allow_html=True)
 
 TAB_PERSIST_JS = """
@@ -238,6 +303,8 @@ st.markdown("""
     .role-user  { color: #1565C0; font-weight: 600; }
     iframe[height="0"] { display: none !important; }
     .batch-info-box { background: #E8F5E9; border-left: 4px solid #4CAF50; padding: 0.8rem 1rem; border-radius: 0 8px 8px 0; margin-bottom: 1rem; }
+    .synonym-info { background: #FFF3E0; border-left: 4px solid #FF9800; padding: 0.5rem 0.9rem;
+                    border-radius: 0 6px 6px 0; font-size: 0.85rem; margin-bottom: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -248,7 +315,7 @@ CACHE_FOLDER    = Path(".cache")
 IMAGES_FOLDER   = Path("images")
 
 
-
+# ── Login Manager ───────────────────────────────────────────────────
 class LoginManager:
     def __init__(self):
         LOGIN_FOLDER.mkdir(parents=True, exist_ok=True)
@@ -366,6 +433,7 @@ def render_login_page(login_mgr: LoginManager):
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+# ── Search Functions ────────────────────────────────────────────────
 def search_part_number(term, excel_files, stok_cache):
     results, seen = [], set()
     term_up = term.strip().upper()
@@ -378,8 +446,8 @@ def search_part_number(term, excel_files, stok_cache):
         df = fi["dataframe"]
         for indexed_pn, indices in fi.get("part_number_index", {}).items():
             if term_up in indexed_pn:
-                row = df.iloc[indices[0]]
-                pn_value = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
+                row        = df.iloc[indices[0]]
+                pn_value   = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
                 stok_value = stok_cache.get(pn_value.upper(), "—") if stok_cache else "—"
                 results.append({
                     "File": sn, "Path": fi["relative_path"], "Sheet": fi["sheet"],
@@ -394,28 +462,44 @@ def search_part_number(term, excel_files, stok_cache):
 
 
 def search_part_name(term, excel_files, stok_cache):
+    """
+    Cari berdasarkan Part Name dengan dukungan sinonim dari data/sinonim/sinonim.json.
+    Jika user ketik 'baut roda', otomatis juga cari 'wheel bolt', 'hub bolt', dst.
+    """
     results = []
     term_up = term.strip().upper()
     if not term_up:
         return results
+
+    # ── Terapkan sinonim ──
+    search_keywords = apply_synonyms(term.strip().lower())
+
     for fi in excel_files:
         df  = fi["dataframe"]
         pni = fi.get("part_name_index", {})
         matching_indices = set()
-        search_words = term_up.split()
-        for word in pni.keys():
-            for sw in search_words:
-                if sw in word or word in sw:
-                    matching_indices.update(pni[word])
-        if not matching_indices and len(term_up) <= 3:
-            for idx, row in df.iterrows():
-                pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
-                if term_up in pname.upper():
-                    matching_indices.add(idx)
+
+        # Cari untuk SEMUA keyword (asli + sinonim)
+        for keyword in search_keywords:
+            kw_up        = keyword.upper()
+            search_words = kw_up.split()
+            for word in pni.keys():
+                for sw in search_words:
+                    if sw in word or word in sw:
+                        matching_indices.update(pni[word])
+            # Fallback untuk keyword pendek (≤3 huruf)
+            if not matching_indices and len(kw_up) <= 3:
+                for idx, row in df.iterrows():
+                    pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
+                    if kw_up in pname.upper():
+                        matching_indices.add(idx)
+
         for idx in matching_indices:
             row   = df.iloc[idx]
             pname = str(row["part_name"]) if pd.notna(row["part_name"]) else ""
-            if term_up in pname.upper():
+            # Harus cocok dengan salah satu keyword
+            matched = any(kw.upper() in pname.upper() for kw in search_keywords)
+            if matched:
                 pn_value   = str(row["part_number"]).strip() if pd.notna(row["part_number"]) else "N/A"
                 stok_value = stok_cache.get(pn_value.upper(), "—") if stok_cache else "—"
                 results.append({
@@ -427,6 +511,7 @@ def search_part_name(term, excel_files, stok_cache):
     return results
 
 
+# ── Build Excel Functions ───────────────────────────────────────────
 def build_batch_excel(df_result: pd.DataFrame) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -436,13 +521,13 @@ def build_batch_excel(df_result: pd.DataFrame) -> bytes:
     ws = wb.active
     ws.title = "Batch Search Result"
 
-    headers = ["Part Number", "Hasil", "Sheet", "Part Name", "Qty", "Stok", "Status"]
+    headers      = ["Part Number", "Hasil", "Sheet", "Part Name", "Qty", "Stok", "Status"]
     header_fill  = PatternFill("solid", fgColor="1565C0")
     header_font  = Font(bold=True, color="FFFFFF", name="Arial", size=11)
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left_align   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-    thin   = Side(style="thin", color="BDBDBD")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    thin         = Side(style="thin", color="BDBDBD")
+    border       = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     for col_idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col_idx, value=h)
@@ -454,9 +539,9 @@ def build_batch_excel(df_result: pd.DataFrame) -> bytes:
     fill_not_found = PatternFill("solid", fgColor="FFEBEE")
     fill_alt       = PatternFill("solid", fgColor="FAFAFA")
 
-    export_cols   = ["Part Number", "Hasil", "Sheet", "Part Name", "Qty", "Stok", "Status"]
-    group_start   = {}
-    group_end     = {}
+    export_cols = ["Part Number", "Hasil", "Sheet", "Part Name", "Qty", "Stok", "Status"]
+    group_start = {}
+    group_end   = {}
 
     for row_offset, (_, r) in enumerate(df_result.iterrows()):
         excel_row = row_offset + 2
@@ -495,18 +580,12 @@ def build_batch_excel(df_result: pd.DataFrame) -> bytes:
 
 
 def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> bytes:
-    """
-    Build catalog Excel: Part Number | Part Name | Kecocokan | Gambar 1 | Gambar 2
-    Gambar diambil dari SIMS — foto ke-1 di kolom D, foto ke-2 di kolom E.
-    Jika hanya 1 foto, kolom D diisi, kolom E kosong.
-    Satu baris per unique Part Number.
-    """
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.drawing.image import Image as XLImage
     from PIL import Image as PILImage
-    import tempfile, os
+    import tempfile
 
     wb = Workbook()
     ws = wb.active
@@ -523,10 +602,8 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
     col_widths = [20, 30, 45, 38, 38]
     for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=ci, value=h)
-        cell.font      = header_font
-        cell.fill      = header_fill
-        cell.alignment = center
-        cell.border    = border
+        cell.font = header_font; cell.fill = header_fill
+        cell.alignment = center; cell.border = border
         ws.column_dimensions[get_column_letter(ci)].width = w
     ws.row_dimensions[1].height = 22
 
@@ -534,7 +611,6 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
     fill_odd  = PatternFill("solid", fgColor="FAFAFA")
     fill_nf   = PatternFill("solid", fgColor="FFEBEE")
 
-    # kumpulkan 1 baris per PN
     grouped = {}
     for _, r in df_result.iterrows():
         pn     = r["_pn_group"]
@@ -550,7 +626,6 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
                 grouped[pn]["Part Name"] = pname
 
     def _make_xl_image(img_bytes, max_h=200):
-        """Resize gambar dan simpan ke file tmp, return (XLImage, w_px, h_px, tmp_path)."""
         pil_img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
         w_px, h_px = pil_img.size
         if h_px > max_h:
@@ -581,13 +656,10 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
         img_d      = None
         img_e      = None
 
-        # fetch 2 gambar BERBEDA dari SIMS
         if SIMS_ENABLED and is_found:
             try:
-                import hashlib
                 urls, _ = _sims_fetch(pn)
                 if urls:
-                    # foto 1 → kolom D (index 0)
                     b1, _ = ExcelSearchApp.fetch_image_bytes(urls[0])
                     if b1:
                         xl, w, h, tmp_path = _make_xl_image(b1)
@@ -595,8 +667,6 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
                         tmp_files.append(tmp_path)
                         row_height = max(int(h * 0.75) + 10, row_height)
                         hash1 = hashlib.md5(b1).hexdigest()
-
-                        # foto 2 → cari URL berikutnya yang berbeda hash
                         for url2 in urls[1:]:
                             b2, _ = ExcelSearchApp.fetch_image_bytes(url2)
                             if b2 and hashlib.md5(b2).hexdigest() != hash1:
@@ -610,22 +680,16 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
 
         ws.row_dimensions[row_idx].height = row_height
 
-        # tulis sel A–C
         for ci, (val, aln) in enumerate(
             [(pn, center), (info["Part Name"], left), (kecocokan, left)], start=1
         ):
-            cell           = ws.cell(row=row_idx, column=ci, value=val)
-            cell.fill      = fill
-            cell.border    = border
-            cell.alignment = aln
-            cell.font      = Font(name="Arial", size=10)
+            cell = ws.cell(row=row_idx, column=ci, value=val)
+            cell.fill = fill; cell.border = border
+            cell.alignment = aln; cell.font = Font(name="Arial", size=10)
 
-        # sel D dan E (gambar)
         for ci in (4, 5):
-            c           = ws.cell(row=row_idx, column=ci, value="")
-            c.fill      = fill
-            c.border    = border
-            c.alignment = center
+            c = ws.cell(row=row_idx, column=ci, value="")
+            c.fill = fill; c.border = border; c.alignment = center
 
         if img_d:
             ws.add_image(img_d, f"D{row_idx}")
@@ -635,13 +699,11 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
         row_idx += 1
 
     ws.freeze_panes = "A2"
-
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     result = buf.getvalue()
 
-    # cleanup tmp files
     for f in tmp_files:
         try:
             os.unlink(f)
@@ -658,8 +720,8 @@ def make_template_excel() -> bytes:
     ws = wb.active
     ws.title = "Part Number List"
     ws["A1"] = "Part Number"
-    ws["A1"].font = Font(bold=True, name="Arial", size=11, color="FFFFFF")
-    ws["A1"].fill = PatternFill("solid", fgColor="1565C0")
+    ws["A1"].font      = Font(bold=True, name="Arial", size=11, color="FFFFFF")
+    ws["A1"].fill      = PatternFill("solid", fgColor="1565C0")
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 20
     for i, ex in enumerate(["WG1642821034", "WG9925520270", "AZ9100443082", "WG9718820030"], start=2):
@@ -669,6 +731,7 @@ def make_template_excel() -> bytes:
     return buf.getvalue()
 
 
+# ── Main App ────────────────────────────────────────────────────────
 class ExcelSearchApp:
     def __init__(self):
         self.data_folder   = DATA_FOLDER
@@ -734,21 +797,19 @@ class ExcelSearchApp:
         if not pn or pd.isna(pn):
             return ""
         pn_str = str(pn).strip().upper()
-        base = pn_str.split("/", 1)[0].strip()
+        base   = pn_str.split("/", 1)[0].strip()
         return re.sub(r'[^A-Z0-9\-]', '_', base)
 
     def get_image_path(self, pn):
         base = self.normalize_base_part_number(pn)
         if not base:
             return None
-        # Cek subfolder: images/PARTNUMBER/foto.jpg (format baru dari admin upload)
         sub_folder = self.images_folder / base
         if sub_folder.exists() and sub_folder.is_dir():
             for ext in self.supported_ext:
                 candidates = sorted(sub_folder.glob(f"*{ext}"))
                 if candidates:
                     return candidates[0]
-        # Fallback ke file langsung: images/PARTNUMBER.jpg (format lama)
         for ext in self.supported_ext:
             p = self.images_folder / f"{base}{ext}"
             if p.exists():
@@ -756,11 +817,10 @@ class ExcelSearchApp:
         return None
 
     def get_all_image_paths(self, pn):
-        """Return semua path gambar lokal untuk suatu part number (subfolder + file langsung)."""
         base = self.normalize_base_part_number(pn)
         if not base:
             return []
-        paths = []
+        paths      = []
         sub_folder = self.images_folder / base
         if sub_folder.exists() and sub_folder.is_dir():
             for ext in self.supported_ext:
@@ -773,16 +833,12 @@ class ExcelSearchApp:
 
     @staticmethod
     def render_zoomable_image(img_bytes: bytes, caption: str = "", zoom_key: str = "zoom_default"):
-        """Tampilkan gambar dengan kontrol zoom menggunakan st.image + CSS transform."""
         import base64
-
         zk = f"zoom_scale_{zoom_key}"
         if zk not in st.session_state:
-            st.session_state[zk] = 100  # persen
+            st.session_state[zk] = 100
 
         scale = st.session_state[zk]
-
-        # Tombol zoom
         c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
         with c1:
             if st.button("🔍＋", key=f"zi_{zoom_key}", help="Zoom In", use_container_width=True):
@@ -802,41 +858,29 @@ class ExcelSearchApp:
                 unsafe_allow_html=True
             )
 
-        # Render gambar dengan CSS transform scale
-        b64 = base64.b64encode(img_bytes).decode()
-        sig = img_bytes[:4]
-        if sig[:2] == b'\xff\xd8':
-            mime = "image/jpeg"
-        elif sig[:4] == b'\x89PNG':
+        b64  = base64.b64encode(img_bytes).decode()
+        sig  = img_bytes[:4]
+        mime = "image/jpeg"
+        if sig[:4] == b'\x89PNG':
             mime = "image/png"
         elif sig[:3] == b'GIF':
             mime = "image/gif"
-        else:
-            mime = "image/jpeg"
 
-        cur_scale = st.session_state[zk]
+        cur_scale    = st.session_state[zk]
         safe_caption = caption.replace("<", "&lt;").replace(">", "&gt;")
-        img_html = f"""
+        st.markdown(f"""
 <div style="overflow:auto; width:100%; text-align:center; padding:4px 0;">
   <img src="data:{mime};base64,{b64}"
-       style="width:{cur_scale}%; max-width:none;
-              transform-origin:top center;
-              border-radius:8px;
-              box-shadow:0 2px 12px rgba(0,0,0,.18);
-              transition:width .2s ease;"
+       style="width:{cur_scale}%; max-width:none; transform-origin:top center;
+              border-radius:8px; box-shadow:0 2px 12px rgba(0,0,0,.18); transition:width .2s ease;"
        title="{safe_caption}" />
   <div style="font-size:.78rem;color:#666;margin-top:4px;">{safe_caption}</div>
-</div>
-"""
-        st.markdown(img_html, unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
     @staticmethod
     def fetch_image_bytes(url: str):
-        """Fetch image from URL and return bytes."""
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-
-            # Sertakan token Authorization untuk semua URL dari server SIMS
             if SIMS_ENABLED:
                 try:
                     from sims_fetcher import _get_token, SIMS_BASE_URL
@@ -850,13 +894,6 @@ class ExcelSearchApp:
                     print(f"[debug] Gagal ambil token SIMS: {e}")
 
             resp = requests.get(url, timeout=15, headers=headers)
-
-            # Debug info ke terminal
-            print(f"[debug] URL: {url}")
-            print(f"[debug] Status: {resp.status_code}")
-            print(f"[debug] Content-Type: {resp.headers.get('Content-Type', '-')}")
-            print(f"[debug] Content-Length: {len(resp.content)}")
-
             if resp.status_code == 200:
                 content_type = resp.headers.get("Content-Type", "")
                 if any(t in content_type for t in ("image", "octet-stream", "jpeg", "png", "gif", "webp")):
@@ -879,7 +916,6 @@ class ExcelSearchApp:
             self.stok_cache = st.session_state.stok_data
             return
         if not self.stok_file.exists():
-            st.warning("File stok tidak ditemukan: data/stok/stok.xlsx")
             self.stok_cache = {}
             st.session_state.stok_data = self.stok_cache
             return
@@ -939,7 +975,7 @@ class ExcelSearchApp:
                 for fi in st.session_state.excel_files:
                     pn_idx = fi.get("part_number_index", {})
                     if pn in pn_idx and pn_idx[pn]:
-                        row = fi["dataframe"].iloc[pn_idx[pn][0]]
+                        row   = fi["dataframe"].iloc[pn_idx[pn][0]]
                         pname = str(row["part_name"]) if pd.notna(row["part_name"]) else "N/A"
                         break
                 results.append({"Part Number": pn, "Part Name": pname,
@@ -998,64 +1034,45 @@ class ExcelSearchApp:
                     if f.lower().endswith(excel_ext):
                         fp = Path(root) / f
                         all_files.append((fp, fp.relative_to(self.data_folder)))
+
             if not all_files:
-                st.session_state.last_file_count = 0
                 return
-            need_reindex = (len(all_files) != st.session_state.last_file_count
-                            or st.session_state.last_index_time is None)
-            if need_reindex:
-                with st.spinner("🔄 Mengindeks file Excel…"):
-                    st.session_state.excel_files = []
-                    st.session_state.index_data  = []
-                    prog = st.progress(0)
-                    txt  = st.empty()
-                    completed = 0
-                    with ThreadPoolExecutor(max_workers=min(4, len(all_files))) as ex:
-                        futures = {ex.submit(self.process_single_file, fp, rp): (fp, rp)
-                                   for fp, rp in all_files}
-                        for future in as_completed(futures):
-                            completed += 1
-                            prog.progress(completed / len(all_files))
-                            txt.text(f"Processing {completed}/{len(all_files)} files…")
-                            try:
-                                for fi in (future.result() or []):
-                                    st.session_state.excel_files.append(fi)
-                                    st.session_state.index_data.append({
-                                        "file": fi["simple_name"], "relative_path": fi["relative_path"],
-                                        "sheet": fi["sheet"], "rows": fi["row_count"],
-                                        "last_modified": fi["last_modified"],
-                                    })
-                            except Exception:
-                                continue
-                    st.session_state.loaded_files_count = len(st.session_state.excel_files)
-                    st.session_state.last_file_count    = len(all_files)
-                    st.session_state.last_index_time    = datetime.now()
-                    prog.empty(); txt.empty()
+
+            results = []
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(self.process_single_file, fp, rp): fp
+                           for fp, rp in all_files}
+                for future in as_completed(futures):
+                    try:
+                        res = future.result()
+                        if res:
+                            results.extend(res)
+                    except Exception:
+                        pass
+
+            st.session_state.excel_files        = results
+            st.session_state.last_index_time    = datetime.now()
+            st.session_state.loaded_files_count = len(results)
+            st.session_state.last_file_count    = len(all_files)
         except Exception as e:
-            st.sidebar.error(f"Error auto-load: {e}")
+            st.error(f"Error loading Excel files: {e}")
 
-    # ── IMAGE SEARCH TAB ────────────────────────────────────────────
-    # ── BATCH DOWNLOAD TAB ──────────────────────────────────────────────────
+    # ── Batch Download Tab ───────────────────────────────────────────
     def render_batch_download_tab(self):
-        st.markdown("### 📥 Batch Download — Cari Banyak Part Number Sekaligus")
-
+        st.markdown("### 📥 Batch Download")
         st.markdown("""
-        <div class="batch-info-box">
-        <b>📋 Format File Input:</b><br>
-        • File Excel (.xlsx / .xls / .xlsm) atau CSV<br>
-        • <b>Kolom A</b> = Part Number (boleh ada header "Part Number" atau langsung data)<br>
-        • Satu Part Number per baris
-        </div>
-        """, unsafe_allow_html=True)
+<div class="batch-info-box">
+Upload file Excel berisi daftar Part Number (1 kolom, mulai baris 1 atau 2).<br>
+Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
+</div>
+""", unsafe_allow_html=True)
 
-        # Template download
         st.download_button(
             label="📄 Download Template Input",
             data=make_template_excel(),
             file_name="template_batch_input.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
         st.divider()
 
         uploaded = st.file_uploader(
@@ -1067,7 +1084,6 @@ class ExcelSearchApp:
         if uploaded is None:
             return
 
-        # Baca file upload
         try:
             if uploaded.name.endswith(".csv"):
                 df_input = pd.read_csv(uploaded, header=None, dtype=str)
@@ -1078,7 +1094,6 @@ class ExcelSearchApp:
             return
 
         col_a = df_input.iloc[:, 0].dropna().astype(str).str.strip()
-        # Buang header jika ada
         if col_a.iloc[0].lower() in ("part number","part_number","partnumber","no part","kode"):
             col_a = col_a.iloc[1:]
 
@@ -1091,17 +1106,13 @@ class ExcelSearchApp:
         st.info(f"📊 **{len(part_numbers)}** Part Number ditemukan dalam file input.")
 
         with st.expander("👁️ Preview Part Number"):
-            st.dataframe(pd.DataFrame({"Part Number": part_numbers}),
-                         hide_index=True, height=200)
+            st.dataframe(pd.DataFrame({"Part Number": part_numbers}), hide_index=True, height=200)
 
-        if st.button("🔍 Proses Batch Search", type="primary",
-                     use_container_width=True, key="batch_process_btn"):
-
+        if st.button("🔍 Proses Batch Search", type="primary", use_container_width=True, key="batch_process_btn"):
             if not st.session_state.excel_files:
                 st.error("Tidak ada file Excel yang ter-index di folder data/.")
                 st.stop()
 
-            # ── Proses pencarian ──
             prog        = st.progress(0)
             status_txt  = st.empty()
             total       = len(part_numbers)
@@ -1134,10 +1145,8 @@ class ExcelSearchApp:
 
             prog.empty()
             status_txt.empty()
-
             df_result = pd.DataFrame(results_all)
 
-            # ── Fetch gambar SIMS & build catalog bytes ──
             prog_cat   = st.progress(0)
             status_cat = st.empty()
 
@@ -1158,7 +1167,6 @@ class ExcelSearchApp:
 
             st.rerun()
 
-        # ── Tampilkan hasil & tombol download (persisten via session_state) ──
         if "batch_catalog_df" not in st.session_state:
             return
 
@@ -1174,8 +1182,7 @@ class ExcelSearchApp:
         st.markdown("#### 📋 Preview Hasil")
         disp_cols = ["Part Number","Hasil","Sheet","Part Name","Qty","Stok","Status"]
         st.dataframe(
-            df_result[disp_cols],
-            hide_index=True,
+            df_result[disp_cols], hide_index=True,
             column_config={
                 "Part Number": st.column_config.TextColumn(width="medium"),
                 "Hasil":       st.column_config.TextColumn(width="medium"),
@@ -1198,7 +1205,108 @@ class ExcelSearchApp:
                 use_container_width=True,
             )
 
-    # ── SIDEBAR & DASHBOARD ──────────────────────────────────────────────────
+    # ── Sinonim Tab (Admin) ──────────────────────────────────────────
+    def render_sinonim_tab(self):
+        """Tab admin untuk melihat dan mengedit kamus sinonim dari data/sinonim/sinonim.json."""
+        st.markdown("### 🔤 Kelola Kamus Sinonim")
+        st.markdown(
+            "Sinonim memungkinkan user mencari dengan kata bahasa Indonesia/informal "
+            "dan tetap menemukan part dengan nama teknis di database."
+        )
+        st.markdown(f"📁 File: `{SINONIM_FILE}`")
+        st.divider()
+
+        # ── Reload cache sinonim ─────────────────────────────────────
+        col_r, _ = st.columns([1, 4])
+        with col_r:
+            if st.button("🔄 Reload Sinonim", key="reload_sinonim"):
+                st.session_state.pop("_synonym_map_cache", None)
+                st.rerun()
+
+        synonym_map = load_synonym_map()
+
+        if not synonym_map:
+            st.warning(f"File sinonim tidak ditemukan atau kosong: `{SINONIM_FILE}`")
+        else:
+            st.success(f"✅ {len(synonym_map)} grup sinonim aktif.")
+
+            # ── Tampilkan tabel ringkasan ─────────────────────────────
+            rows = []
+            for g in synonym_map:
+                rows.append({
+                    "Grup"    : g.get("grup", "-"),
+                    "Triggers (kata pencarian)": ", ".join(g["triggers"]),
+                    "Keywords (dicari di data)": ", ".join(g["keywords"]),
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, height=400)
+
+        st.divider()
+
+        # ── Editor JSON langsung ──────────────────────────────────────
+        st.markdown("#### ✏️ Edit File Sinonim (JSON)")
+        st.markdown(
+            "Edit langsung isi file JSON di bawah. "
+            "Setiap grup harus memiliki `triggers` (pemicu) dan `keywords` (kata yang dicari di data)."
+        )
+
+        # Baca konten file saat ini
+        current_json = ""
+        if SINONIM_FILE.exists():
+            try:
+                current_json = SINONIM_FILE.read_text(encoding="utf-8")
+            except Exception as e:
+                st.error(f"Gagal membaca file: {e}")
+
+        edited_json = st.text_area(
+            "Isi sinonim.json:",
+            value=current_json,
+            height=450,
+            key="sinonim_editor",
+        )
+
+        col_save, col_fmt = st.columns([1, 1])
+        with col_fmt:
+            if st.button("🔍 Validasi JSON", use_container_width=True, key="validate_json"):
+                try:
+                    parsed = json.loads(edited_json)
+                    st.success(f"✅ JSON valid! ({len(parsed)} grup ditemukan)")
+                except json.JSONDecodeError as e:
+                    st.error(f"❌ JSON tidak valid: {e}")
+
+        with col_save:
+            if st.button("💾 Simpan Sinonim", type="primary", use_container_width=True, key="save_sinonim"):
+                try:
+                    parsed = json.loads(edited_json)
+                    SINONIM_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    SINONIM_FILE.write_text(
+                        json.dumps(parsed, ensure_ascii=False, indent=2),
+                        encoding="utf-8"
+                    )
+                    # Hapus cache agar langsung terbaca ulang
+                    st.session_state.pop("_synonym_map_cache", None)
+                    st.success("✅ Sinonim berhasil disimpan dan di-reload!")
+                    st.rerun()
+                except json.JSONDecodeError as e:
+                    st.error(f"❌ Gagal menyimpan — JSON tidak valid: {e}")
+                except Exception as e:
+                    st.error(f"❌ Gagal menyimpan file: {e}")
+
+        st.markdown("---")
+        st.markdown("#### 📖 Panduan Format JSON")
+        st.code("""[
+  {
+    "grup": "Nama Grup (opsional, untuk label)",
+    "triggers": ["kata pencarian 1", "kata pencarian 2", "dst"],
+    "keywords": ["keyword di data 1", "keyword di data 2", "dst"]
+  },
+  {
+    "grup": "Baut Roda",
+    "triggers": ["baut roda", "mur roda", "baut velg"],
+    "keywords": ["wheel bolt", "hub bolt", "wheel nut"]
+  }
+]""", language="json")
+
+    # ── SIDEBAR & DASHBOARD ──────────────────────────────────────────
     def display_dashboard(self):
         user = LoginManager.get_current_user()
         role = user["role"] if user else "user"
@@ -1240,7 +1348,8 @@ class ExcelSearchApp:
                 for cf in CACHE_FOLDER.glob("*.pkl"):
                     try: cf.unlink()
                     except Exception: pass
-                for k in ("excel_files","last_index_time","last_file_count","stok_data","threshold_data"):
+                for k in ("excel_files","last_index_time","last_file_count","stok_data",
+                          "threshold_data","_synonym_map_cache"):
                     st.session_state.pop(k, None)
                 self.stok_cache = None; self.threshold_cache = None
                 self._load_stok_data(); self._load_threshold_data()
@@ -1252,7 +1361,12 @@ class ExcelSearchApp:
             st.divider()
             st.markdown("### 📈 Statistik")
             st.metric("File Excel", st.session_state.get("loaded_files_count", 0))
+
+            # Info sinonim aktif di sidebar
+            syn_map = load_synonym_map()
+            st.metric("Grup Sinonim", len(syn_map))
             st.divider()
+
             st.markdown("### 📁 Struktur Folder")
             st.info(f"File Excel dibaca dari:\n```\n{self.data_folder.absolute()}\n```")
 
@@ -1263,27 +1377,33 @@ class ExcelSearchApp:
 3. **Stok:** data/stok/stok.xlsx (Kol A=PN, Kol D=Stok)
 4. **Threshold (Admin):** data/stok/threshold.xlsx
 5. **Batch Download:** Upload Excel berisi PN di Kol A
+6. **Sinonim:** Edit di `data/sinonim/sinonim.json`
                 """)
 
-        # ── TABS ──
+        # ── TABS ────────────────────────────────────────────────────
         st.markdown(TAB_PERSIST_JS, unsafe_allow_html=True)
         st.markdown('<div class="search-box">', unsafe_allow_html=True)
         st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
 
         if role == "admin":
-            tab1, tab2, tab4, tab5, tab_admin_img = st.tabs([
+            tab1, tab2, tab4, tab5, tab_admin_img, tab_sinonim = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
-                "📥 Batch Download", "🚛 Populasi Unit", "🖼️ Kelola Foto"])
+                "📥 Batch Download", "🚛 Populasi Unit",
+                "🖼️ Kelola Foto", "🔤 Kelola Sinonim"])
         else:
             tab1, tab2, tab4, tab5 = st.tabs([
                 "🔢 Search Part Number", "📝 Search Part Name",
                 "📥 Batch Download", "🚛 Populasi Unit"])
             tab_admin_img = None
-        tab3 = None
+            tab_sinonim   = None
 
         with tab1:
             with st.form(key="search_pn_form", clear_on_submit=False):
-                sn_input = st.text_input("Masukkan Part Number:", placeholder="Contoh: WG1642821034/1", key="sn_input")
+                sn_input = st.text_input(
+                    "Masukkan Part Number:",
+                    placeholder="Contoh: WG1642821034/1",
+                    key="sn_input"
+                )
                 if st.form_submit_button("🔍 Cari Part Number", type="primary", use_container_width=True):
                     if sn_input:
                         with st.spinner("Mencari…"):
@@ -1297,9 +1417,19 @@ class ExcelSearchApp:
 
         with tab2:
             with st.form(key="search_name_form", clear_on_submit=False):
-                name_input = st.text_input("Masukkan Part Name:", placeholder="Contoh: Bearing, Screw", key="name_input")
+                name_input = st.text_input(
+                    "Masukkan Part Name:",
+                    placeholder="Contoh: baut roda, bearing, kampas rem",
+                    key="name_input"
+                )
                 if st.form_submit_button("🔍 Cari Part Name", type="primary", use_container_width=True):
                     if name_input:
+                        # Tampilkan info sinonim yang akan digunakan
+                        synonyms_used = apply_synonyms(name_input.strip().lower())
+                        if len(synonyms_used) > 1:
+                            st.session_state["last_synonyms_used"] = synonyms_used[1:]
+                        else:
+                            st.session_state["last_synonyms_used"] = []
                         with st.spinner("Mencari…"):
                             st.session_state.search_results = search_part_name(
                                 name_input, st.session_state.excel_files, self.stok_cache)
@@ -1309,9 +1439,22 @@ class ExcelSearchApp:
                     else:
                         st.warning("Masukkan nama part untuk mencari.")
 
+            # Tampilkan sinonim yang digunakan (di luar form)
+            syns = st.session_state.get("last_synonyms_used", [])
+            if syns and st.session_state.get("search_type") == "Part Name":
+                st.markdown(
+                    f'<div class="synonym-info">🔄 <b>Sinonim yang dicari:</b> '
+                    f'{", ".join(f"<code>{s}</code>" for s in syns)}</div>',
+                    unsafe_allow_html=True
+                )
+
         if tab_admin_img is not None:
             with tab_admin_img:
                 self.render_admin_image_tab()
+
+        if tab_sinonim is not None:
+            with tab_sinonim:
+                self.render_sinonim_tab()
 
         with tab4:
             self.render_batch_download_tab()
@@ -1329,8 +1472,8 @@ class ExcelSearchApp:
             st.markdown(f'<h3 class="sub-header">📋 Hasil Pencarian ({len(results)} ditemukan)</h3>',
                         unsafe_allow_html=True)
             df_res = pd.DataFrame(results)
-            cols = [c for c in ["File","Part Number","Part Name","Quantity","Stok","Sheet","Excel Row"]
-                    if c in df_res.columns]
+            cols   = [c for c in ["File","Part Number","Part Name","Quantity","Stok","Sheet","Excel Row"]
+                      if c in df_res.columns]
             st.dataframe(df_res[cols], hide_index=True,
                          column_config={
                              "File":        st.column_config.TextColumn(width="medium"),
@@ -1344,13 +1487,12 @@ class ExcelSearchApp:
             if st.session_state.get("search_type") == "Part Number":
                 st.markdown("### 🖼️ Gambar Part")
                 for pn in df_res["Part Number"].dropna().unique():
-                    rows = df_res[df_res["Part Number"] == pn]
+                    rows     = df_res[df_res["Part Number"] == pn]
                     pname_ex = rows.iloc[0]["Part Name"] if not rows.empty else "N/A"
 
                     sims_key     = f"sims_fetched_{pn}"
                     sims_err_key = f"sims_err_{pn}"
 
-                    # Fetch dari SIMS — cache di session_state selama session ini
                     if sims_key not in st.session_state:
                         if SIMS_ENABLED:
                             with st.spinner(f"🔍 Mengambil gambar dari SIMS untuk {pn}..."):
@@ -1362,9 +1504,7 @@ class ExcelSearchApp:
                             st.session_state[sims_err_key] = "SIMS tidak aktif"
 
                     img_links = st.session_state[sims_key]
-
-                    # Fallback ke file lokal
-                    img_path = self.get_image_path(pn)
+                    img_path  = self.get_image_path(pn)
                     if img_path and not img_path.exists():
                         img_path = None
 
@@ -1381,38 +1521,30 @@ class ExcelSearchApp:
                                 st.warning(f"⚠️ SIMS: {sims_err}")
 
                         if img_links:
-                            # Session state key untuk index gambar per PN
                             idx_key = f"img_idx_{pn}"
                             if idx_key not in st.session_state:
                                 st.session_state[idx_key] = 0
 
-                            total = len(img_links)
+                            total       = len(img_links)
                             current_idx = st.session_state[idx_key]
 
-                            # Navigasi panah (hanya tampil jika > 1 gambar)
                             if total > 1:
                                 col_prev, col_info, col_next = st.columns([1, 3, 1])
                                 with col_prev:
-                                    if st.button("◀ Prev", key=f"prev_{pn}",
-                                                 disabled=(current_idx == 0),
-                                                 ):
+                                    if st.button("◀ Prev", key=f"prev_{pn}", disabled=(current_idx == 0)):
                                         st.session_state[idx_key] = max(0, current_idx - 1)
                                         st.rerun()
                                 with col_info:
                                     st.markdown(
-                                        f"<div style='text-align:center; padding:6px 0; "
-                                        f"font-weight:600; color:#1565C0;'>"
+                                        f"<div style='text-align:center; padding:6px 0; font-weight:600; color:#1565C0;'>"
                                         f"Gambar {current_idx + 1} / {total}</div>",
                                         unsafe_allow_html=True
                                     )
                                 with col_next:
-                                    if st.button("Next ▶", key=f"next_{pn}",
-                                                 disabled=(current_idx == total - 1),
-                                                 ):
+                                    if st.button("Next ▶", key=f"next_{pn}", disabled=(current_idx == total - 1)):
                                         st.session_state[idx_key] = min(total - 1, current_idx + 1)
                                         st.rerun()
 
-                            # Tampilkan gambar aktif dalam kolom agar lebih kecil & rapi
                             active_url = img_links[current_idx]
                             with st.spinner("Memuat gambar..."):
                                 img_bytes, err = ExcelSearchApp.fetch_image_bytes(active_url)
@@ -1426,26 +1558,24 @@ class ExcelSearchApp:
                                             zoom_key=f"{pn}_{current_idx}"
                                         )
                                 except Exception as e:
-                                    st.error(f"⚠️ Gambar berhasil diunduh ({len(img_bytes):,} bytes) tapi gagal ditampilkan: {e}")
+                                    st.error(f"⚠️ Gambar berhasil diunduh tapi gagal ditampilkan: {e}")
                                     st.caption(f"URL: {active_url}")
                             else:
                                 st.warning(f"⚠️ Gagal memuat gambar: {err}")
                                 st.caption(f"URL: {active_url}")
 
-                            # Thumbnail strip (jika > 1)
                             if total > 1:
                                 st.markdown("**Pilih gambar:**")
                                 thumb_cols = st.columns(min(total, 5))
                                 for ti, (tc, lnk) in enumerate(zip(thumb_cols, img_links)):
                                     with tc:
                                         label = f"{'✅' if ti == current_idx else '🔲'} {ti+1}"
-                                        if st.button(label, key=f"thumb_{pn}_{ti}",
-                                                     ):
+                                        if st.button(label, key=f"thumb_{pn}_{ti}"):
                                             st.session_state[idx_key] = ti
                                             st.rerun()
 
                         elif img_path:
-                            local_paths = self.get_all_image_paths(pn)
+                            local_paths   = self.get_all_image_paths(pn)
                             if not local_paths:
                                 local_paths = [img_path]
                             local_idx_key = f"local_img_idx_{pn}"
@@ -1483,11 +1613,11 @@ class ExcelSearchApp:
                                 st.caption("📷 Tidak ada gambar di SIMS untuk part ini")
                             else:
                                 st.caption("Tidak ada gambar tersedia")
+
         elif "search_term" in st.session_state and st.session_state.get("search_results") is not None:
             search_term = st.session_state.search_term
             st.warning(f"❌ Tidak ditemukan hasil untuk '{search_term}'")
 
-            # Tetap tampilkan gambar part jika tersedia, meskipun tidak ditemukan di Excel
             if st.session_state.get("search_type") == "Part Number":
                 sims_key     = f"sims_fetched_{search_term}"
                 sims_err_key = f"sims_err_{search_term}"
@@ -1503,14 +1633,12 @@ class ExcelSearchApp:
                         st.session_state[sims_err_key] = "SIMS tidak aktif"
 
                 img_links = st.session_state[sims_key]
-
-                img_path = self.get_image_path(search_term)
+                img_path  = self.get_image_path(search_term)
                 if img_path and not img_path.exists():
                     img_path = None
 
                 st.markdown("### 🖼️ Gambar Part")
                 with st.expander(f"🖼️ {search_term}", expanded=True):
-                    # Tombol refresh
                     if SIMS_ENABLED:
                         col_ref, _ = st.columns([1, 4])
                         with col_ref:
@@ -1531,20 +1659,17 @@ class ExcelSearchApp:
                             if total > 1:
                                 col_prev, col_info, col_next = st.columns([1, 3, 1])
                                 with col_prev:
-                                    if st.button("◀ Prev", key=f"nf_prev_{search_term}",
-                                                 disabled=(current_idx == 0)):
+                                    if st.button("◀ Prev", key=f"nf_prev_{search_term}", disabled=(current_idx == 0)):
                                         st.session_state[idx_key] = max(0, current_idx - 1)
                                         st.rerun()
                                 with col_info:
                                     st.markdown(
-                                        f"<div style='text-align:center; padding:6px 0; "
-                                        f"font-weight:600; color:#1565C0;'>"
+                                        f"<div style='text-align:center; padding:6px 0; font-weight:600; color:#1565C0;'>"
                                         f"Gambar {current_idx + 1} / {total}</div>",
                                         unsafe_allow_html=True
                                     )
                                 with col_next:
-                                    if st.button("Next ▶", key=f"nf_next_{search_term}",
-                                                 disabled=(current_idx == total - 1)):
+                                    if st.button("Next ▶", key=f"nf_next_{search_term}", disabled=(current_idx == total - 1)):
                                         st.session_state[idx_key] = min(total - 1, current_idx + 1)
                                         st.rerun()
 
@@ -1573,8 +1698,7 @@ class ExcelSearchApp:
                                 for ti, (tc, lnk) in enumerate(zip(thumb_cols, img_links)):
                                     with tc:
                                         label = f"{'✅' if ti == current_idx else '🔲'} {ti+1}"
-                                        if st.button(label, key=f"nf_thumb_{search_term}_{ti}",
-                                                     ):
+                                        if st.button(label, key=f"nf_thumb_{search_term}_{ti}"):
                                             st.session_state[idx_key] = ti
                                             st.rerun()
 
@@ -1620,11 +1744,10 @@ class ExcelSearchApp:
                             st.caption("📷 Tidak ada gambar di SIMS untuk part ini")
 
     def _load_populasi_data(self):
-        """Baca semua file Excel dari folder data/populasi/ dan gabungkan."""
         if "populasi_df" in st.session_state:
             return st.session_state.populasi_df
         excel_ext = (".xlsx", ".xls", ".xlsm")
-        frames = []
+        frames    = []
         if self.populasi_folder.exists():
             for fp in sorted(self.populasi_folder.iterdir()):
                 if fp.suffix.lower() not in excel_ext:
@@ -1646,7 +1769,6 @@ class ExcelSearchApp:
         return combined
 
     def render_admin_image_tab(self):
-        """Tab khusus admin: upload & kelola foto manual untuk part yang tidak ada di SIMS."""
         st.markdown("### 🖼️ Kelola Foto Part (Manual)")
         st.markdown(
             "Upload foto untuk part yang tidak memiliki gambar di SIMS. "
@@ -1654,13 +1776,11 @@ class ExcelSearchApp:
         )
         st.markdown("---")
 
-        # ── Upload Foto Baru ──────────────────────────────────────────────
         st.markdown("#### ➕ Upload Foto Baru")
         col_pn, col_up = st.columns([1, 2])
         with col_pn:
             part_input = st.text_input(
-                "Part Number:",
-                placeholder="Contoh: WG9925520270",
+                "Part Number:", placeholder="Contoh: WG9925520270",
                 key="admin_img_pn_input",
             ).strip().upper()
         with col_up:
@@ -1693,18 +1813,13 @@ class ExcelSearchApp:
                     st.info(f"ℹ️ {len(skipped)} file dilewati (sudah ada): {', '.join(skipped)}")
 
         st.markdown("---")
-
-        # ── Daftar Foto yang Sudah Ada ────────────────────────────────────
         st.markdown("#### 📂 Foto yang Sudah Ada")
 
-        # Kumpulkan semua folder/part yang punya foto lokal
-        img_ext = {".jpg", ".jpeg", ".png"}
+        img_ext      = {".jpg", ".jpeg", ".png"}
         part_folders = sorted([
             p for p in self.images_folder.iterdir()
             if p.is_dir() and any(f.suffix.lower() in img_ext for f in p.iterdir())
         ])
-
-        # Juga cek file langsung di images/ (format lama: PARTNUMBER.jpg)
         direct_files = sorted([
             f for f in self.images_folder.iterdir()
             if f.is_file() and f.suffix.lower() in img_ext
@@ -1715,14 +1830,11 @@ class ExcelSearchApp:
             st.info("Belum ada foto manual yang tersimpan di folder `images/`.")
         else:
             st.caption(f"Ditemukan foto untuk **{total_parts}** part.")
-
-            # Filter pencarian
             search_pn = st.text_input(
                 "🔍 Filter Part Number:", placeholder="Ketik untuk filter",
                 key="admin_img_filter"
             ).strip().upper()
 
-            # Tampilkan per-folder (subfolder)
             for pf in part_folders:
                 pn_name = pf.name.upper()
                 if search_pn and search_pn not in pn_name:
@@ -1739,17 +1851,14 @@ class ExcelSearchApp:
                                     st.image(fpath.read_bytes(), caption=fpath.name, use_container_width=True)
                                 except Exception:
                                     st.caption(f"⚠️ {fpath.name} (gagal dimuat)")
-                                if st.button(
-                                    f"🗑️ Hapus", key=f"del_{pn_name}_{fpath.name}",
-                                    help=f"Hapus {fpath.name}"
-                                ):
+                                if st.button(f"🗑️ Hapus", key=f"del_{pn_name}_{fpath.name}",
+                                             help=f"Hapus {fpath.name}"):
                                     try:
                                         fpath.unlink()
                                         st.toast(f"✅ {fpath.name} dihapus.")
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"Gagal hapus: {e}")
-                    # Hapus folder jika sudah kosong setelah hapus file
                     remaining = [f for f in pf.iterdir() if f.suffix.lower() in img_ext]
                     if not remaining:
                         try:
@@ -1757,7 +1866,6 @@ class ExcelSearchApp:
                         except Exception:
                             pass
 
-            # Tampilkan file langsung di images/ (format lama)
             for fpath in direct_files:
                 pn_name = fpath.stem.upper()
                 if search_pn and search_pn not in pn_name:
@@ -1779,8 +1887,8 @@ class ExcelSearchApp:
                                 st.error(f"Gagal hapus: {e}")
 
     def render_populasi_tab(self):
-        user = LoginManager.get_current_user()
-        role = user["role"] if user else "user"
+        user     = LoginManager.get_current_user()
+        role     = user["role"] if user else "user"
         is_admin = (role == "admin")
 
         st.markdown("### 🚛 Populasi Unit")
@@ -1801,7 +1909,6 @@ class ExcelSearchApp:
         display_cols = [c for c in df.columns if not c.startswith("_source")]
         df_display   = df[display_cols].copy()
 
-        # ── Mode Toggle (Admin only) ─────────────────────────────────
         edit_mode = False
         if is_admin:
             with col_mode:
@@ -1813,30 +1920,20 @@ class ExcelSearchApp:
                 )
                 st.session_state["pop_edit_mode"] = edit_mode
 
-        # ── EDIT MODE (Admin) ────────────────────────────────────────
         if is_admin and edit_mode:
             st.info("✏️ **Mode Edit Aktif** — Pilih file & sheet, edit data, lalu klik Simpan ke GitHub.", icon="ℹ️")
 
-            # Pilih file sumber
             source_files  = sorted(df["_source_file"].dropna().unique().tolist())
-            sel_file = st.selectbox("📁 Pilih File Populasi:", source_files, key="pop_edit_file")
-
-            # Pilih sheet dari file tersebut
+            sel_file      = st.selectbox("📁 Pilih File Populasi:", source_files, key="pop_edit_file")
             source_sheets = sorted(df[df["_source_file"] == sel_file]["_source_sheet"].dropna().unique().tolist())
-            sel_sheet = st.selectbox("📋 Pilih Sheet:", source_sheets, key="pop_edit_sheet")
+            sel_sheet     = st.selectbox("📋 Pilih Sheet:", source_sheets, key="pop_edit_sheet")
 
-            # Filter data untuk file+sheet yang dipilih
-            mask_edit = (df["_source_file"] == sel_file) & (df["_source_sheet"] == sel_sheet)
+            mask_edit   = (df["_source_file"] == sel_file) & (df["_source_sheet"] == sel_sheet)
             df_edit_raw = df[mask_edit][display_cols].copy().reset_index(drop=True)
 
             st.caption(f"📊 {len(df_edit_raw)} baris ditemukan di `{sel_file}` → sheet `{sel_sheet}`")
-
-            # ── Data Editor ──
             st.markdown("#### 📝 Edit Data")
-            st.markdown(
-                "<small>Klik sel untuk mengedit. Gunakan tombol ➕ untuk tambah baris baru.</small>",
-                unsafe_allow_html=True,
-            )
+            st.markdown("<small>Klik sel untuk mengedit. Gunakan tombol ➕ untuk tambah baris baru.</small>", unsafe_allow_html=True)
 
             edited_df = st.data_editor(
                 df_edit_raw,
@@ -1851,25 +1948,19 @@ class ExcelSearchApp:
 
             with col_save:
                 if st.button("💾 Simpan ke GitHub", type="primary", use_container_width=True, key="pop_save_github"):
-                    # Gabungkan perubahan: update baris untuk file+sheet ini, biarkan sisanya
-                    df_others = df[~mask_edit].copy()
-
-                    # Tambahkan kolom _source kembali ke edited_df
-                    edited_df_with_src = edited_df.copy()
+                    df_others               = df[~mask_edit].copy()
+                    edited_df_with_src      = edited_df.copy()
                     edited_df_with_src["_source_file"]  = sel_file
                     edited_df_with_src["_source_sheet"] = sel_sheet
-
                     df_full_updated = pd.concat([df_others, edited_df_with_src], ignore_index=True)
 
                     with st.spinner("⏳ Menyimpan ke GitHub..."):
                         ok, err = save_populasi_to_github(
-                            df_full_updated, sel_file, sel_sheet,
-                            user["username"]
+                            df_full_updated, sel_file, sel_sheet, user["username"]
                         )
 
                     if ok:
                         st.success(f"✅ Berhasil disimpan ke GitHub!\nFile: `{sel_file}` | Sheet: `{sel_sheet}`")
-                        # Invalidate cache populasi agar data terbaru dimuat
                         st.session_state.pop("populasi_df", None)
                         st.session_state["pop_edit_mode"] = False
                         st.rerun()
@@ -1881,7 +1972,6 @@ class ExcelSearchApp:
                     st.session_state["pop_edit_mode"] = False
                     st.rerun()
 
-            # Download hasil edit sebagai Excel lokal (preview sebelum push)
             dl_buf = io.BytesIO()
             edited_df.to_excel(dl_buf, index=False, engine="openpyxl")
             dl_buf.seek(0)
@@ -1892,9 +1982,8 @@ class ExcelSearchApp:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="pop_preview_dl",
             )
-            return  # stop di sini saat mode edit, tidak tampilkan tabel filter
+            return
 
-        # ── VIEW MODE (semua user) ───────────────────────────────────
         with st.expander("🔍 Filter & Pencarian", expanded=True):
             search_col, filter_area = st.columns([2, 3])
             with search_col:
@@ -1905,26 +1994,22 @@ class ExcelSearchApp:
                 )
                 st.session_state["pop_keyword_val"] = keyword
             with filter_area:
-                fcols = st.columns(2)
-                filter_vals = {}
+                fcols             = st.columns(2)
+                filter_vals       = {}
                 candidate_filters = ["MODEL", "JENIS", "TIPE UNIT", "LOKASI KERJA", "TAHUN", "Euro"]
                 available_filters = [c for c in candidate_filters if c in df_display.columns][:4]
                 for i, col in enumerate(available_filters):
                     with fcols[i % 2]:
                         options = ["Semua"] + sorted(df_display[col].dropna().unique().tolist())
-                        sk = f"pop_filter_{col}"
-                        saved = st.session_state.get(sk, "Semua")
+                        sk      = f"pop_filter_{col}"
+                        saved   = st.session_state.get(sk, "Semua")
                         if saved not in options:
                             saved = "Semua"
-                        filter_vals[col] = st.selectbox(
-                            col, options,
-                            index=options.index(saved),
-                            key=sk,
-                        )
+                        filter_vals[col] = st.selectbox(col, options, index=options.index(saved), key=sk)
 
         mask = pd.Series([True] * len(df_display), index=df_display.index)
         if keyword.strip():
-            kw = keyword.strip().upper()
+            kw      = keyword.strip().upper()
             kw_mask = pd.Series([False] * len(df_display), index=df_display.index)
             for col in df_display.columns:
                 kw_mask |= df_display[col].astype(str).str.upper().str.contains(kw, na=False)
