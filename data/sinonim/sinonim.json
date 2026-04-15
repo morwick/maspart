@@ -1,102 +1,65 @@
 [
   {
-    "grup": "Baut Roda",
-    "triggers": ["baut roda", "mur roda", "baut velg", "hub bolt", "wheel bolt"],
-    "keywords": ["hub bolt", "wheel bolt", "wheel stud", "wheel nut", "hub nut"]
+    "grup": "Kabin",
+    "triggers": [
+      "kabin"
+    ],
+    "keywords": [
+      "Cab body"
+    ]
   },
   {
-    "grup": "Rem",
-    "triggers": ["kampas rem", "brake pad", "brake lining", "sepatu rem", "kanvas rem"],
-    "keywords": ["brake lining", "brake pad", "brake shoe", "brake block"]
+    "grup": "kabin",
+    "triggers": [
+      "pintu",
+      "pintu kanan"
+    ],
+    "keywords": [
+      "Right door",
+      "Right door assembly"
+    ]
   },
   {
-    "grup": "Filter Udara",
-    "triggers": ["filter udara", "saringan udara", "air filter", "air cleaner"],
-    "keywords": ["air filter", "air cleaner", "air element", "filter element"]
+    "grup": "kabin",
+    "triggers": [
+      "pintu",
+      "pintu kiri"
+    ],
+    "keywords": [
+      "Left door",
+      "Left door assembly"
+    ]
   },
   {
-    "grup": "Filter Oli",
-    "triggers": ["filter oli", "saringan oli", "oil filter"],
-    "keywords": ["oil filter", "oil element", "lube filter"]
+    "grup": "kabin",
+    "triggers": [
+      "engsel",
+      "Engsel Pintu Atas Kiri",
+      "engsel pintu kiri"
+    ],
+    "keywords": [
+      "Front upper hinge",
+      "Front upper hinge assembly of left door"
+    ]
   },
   {
-    "grup": "Filter Bahan Bakar",
-    "triggers": ["filter solar", "filter bbm", "saringan solar", "fuel filter"],
-    "keywords": ["fuel filter", "fuel element", "diesel filter"]
+    "grup": "kabin",
+    "triggers": [
+      "engsel"
+    ],
+    "keywords": [
+      "hinge"
+    ]
   },
   {
-    "grup": "Aki / Baterai",
-    "triggers": ["aki", "accu", "baterai", "battery", "accumulator"],
-    "keywords": ["battery", "accumulator", "accu", "storage battery"]
-  },
-  {
-    "grup": "Kopling",
-    "triggers": ["kopling", "clutch", "coupling", "plat kopling"],
-    "keywords": ["clutch", "coupling", "clutch disc", "clutch plate", "clutch cover"]
-  },
-  {
-    "grup": "Bearing / Laher",
-    "triggers": ["bearing", "laher", "roller bearing", "ball bearing"],
-    "keywords": ["bearing", "roller bearing", "ball bearing", "taper bearing", "needle bearing"]
-  },
-  {
-    "grup": "Velg / Pelek",
-    "triggers": ["velg", "pelek", "rim", "disc wheel", "road wheel"],
-    "keywords": ["rim", "wheel rim", "disc wheel", "road wheel", "steel rim"]
-  },
-  {
-    "grup": "Ban",
-    "triggers": ["ban", "tyre", "tire", "ban luar"],
-    "keywords": ["tyre", "tire", "pneumatic tyre", "inner tube"]
-  },
-  {
-    "grup": "Oli / Pelumas",
-    "triggers": ["oli", "minyak pelumas", "lubricant", "grease", "gemuk"],
-    "keywords": ["oil", "lubricant", "grease", "lubricating oil", "engine oil"]
-  },
-  {
-    "grup": "V-Belt",
-    "triggers": ["belt", "v-belt", "fan belt", "drive belt", "tali kipas"],
-    "keywords": ["v-belt", "fan belt", "drive belt", "poly v belt", "timing belt"]
-  },
-  {
-    "grup": "Seal",
-    "triggers": ["seal", "oil seal", "sil", "gasket"],
-    "keywords": ["seal", "oil seal", "gasket", "o-ring", "lip seal"]
-  },
-  {
-    "grup": "Radiator",
-    "triggers": ["radiator", "kipas radiator", "cooling fan"],
-    "keywords": ["radiator", "cooling fan", "radiator fan", "water radiator"]
-  },
-  {
-    "grup": "Pompa Air",
-    "triggers": ["pompa air", "water pump", "pompa pendingin"],
-    "keywords": ["water pump", "coolant pump", "pump assembly"]
-  },
-  {
-    "grup": "Alternator",
-    "triggers": ["alternator", "dinamo ampere", "generator"],
-    "keywords": ["alternator", "generator", "charging generator"]
-  },
-  {
-    "grup": "Starter",
-    "triggers": ["starter", "motor starter", "dinamo starter"],
-    "keywords": ["starter", "starting motor", "starter motor"]
-  },
-  {
-    "grup": "Shock Absorber",
-    "triggers": ["shock", "shock absorber", "per", "peredam"],
-    "keywords": ["shock absorber", "damper", "spring", "suspension spring"]
-  },
-  {
-    "grup": "Steer",
-    "triggers": ["steer", "kemudi", "setir", "steering"],
-    "keywords": ["steering", "steering gear", "steering linkage", "tie rod"]
-  },
-  {
-    "grup": "Piston",
-    "triggers": ["piston", "torak", "ring piston", "liner"],
-    "keywords": ["piston", "piston ring", "cylinder liner", "piston pin"]
+    "grup": "kabin",
+    "triggers": [
+      "engsel",
+      "engsel pintu atas"
+    ],
+    "keywords": [
+      "Front upper hinge",
+      "assembly of right door"
+    ]
   }
 ]
