@@ -611,19 +611,21 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None) -> byte
     fill_odd  = PatternFill("solid", fgColor="FAFAFA")
     fill_nf   = PatternFill("solid", fgColor="FFEBEE")
 
-    grouped = {}
+    # Pertahankan urutan PN sesuai template (urutan kemunculan pertama di df_result)
+    pn_order = list(dict.fromkeys(df_result["_pn_group"].tolist()))
+    grouped  = {pn: {"Part Name": "", "kecocokan_list": [], "found": False} for pn in pn_order}
     for _, r in df_result.iterrows():
         pn     = r["_pn_group"]
         status = r.get("Status", "")
         hasil  = r.get("Hasil", "")
         pname  = r.get("Part Name", "")
-        if pn not in grouped:
-            grouped[pn] = {"Part Name": pname, "kecocokan_list": [], "found": False}
         if status == "✅ Ditemukan" and hasil:
             grouped[pn]["kecocokan_list"].append(hasil)
             grouped[pn]["found"] = True
             if not grouped[pn]["Part Name"]:
                 grouped[pn]["Part Name"] = pname
+        elif not grouped[pn]["Part Name"] and pname:
+            grouped[pn]["Part Name"] = pname
 
     def _make_xl_image(img_bytes, max_h=200):
         pil_img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
