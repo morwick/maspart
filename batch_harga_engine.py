@@ -299,14 +299,22 @@ def render_batch_harga_tab(b_rate: float | None = None):
     if stop_clicked:
         st.session_state[_SS_STOP_FLAG] = True
         st.session_state[_SS_RUNNING]   = False
-        thread: threading.Thread | None = st.session_state.get(_SS_THREAD)
-        if thread and thread.is_alive():
-            # Event dikirim ke thread, thread akan berhenti sendiri
-            pass
+        # ── FIX: kirim sinyal stop ke thread via Event ──
+        stop_event: threading.Event | None = st.session_state.get("bhe_stop_event")
+        if stop_event is not None:
+            stop_event.set()
         st.toast("⏸️ Proses dijeda. Klik ▶️ Lanjutkan untuk melanjutkan.", icon="⏸️")
         st.rerun()
 
     if run_clicked and pn_list:
+        # ── FIX: hentikan thread lama jika masih hidup ──
+        old_stop_event: threading.Event | None = st.session_state.get("bhe_stop_event")
+        if old_stop_event is not None:
+            old_stop_event.set()
+        old_thread: threading.Thread | None = st.session_state.get(_SS_THREAD)
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=3)   # tunggu maks 3 detik
+
         job_id = _compute_job_id(pn_list)
 
         # Load hasil yang sudah ada (resume)
