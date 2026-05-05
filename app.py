@@ -4,6 +4,7 @@ EXCEL PART SEARCH WEB APP dengan AUTO-LOADING + LOGIN SYSTEM + THRESHOLD + BATCH
 """
 
 import streamlit as st
+import streamlit.components.v1 as _stc
 import pandas as pd
 import os
 from pathlib import Path
@@ -505,6 +506,81 @@ st.set_page_config(
     menu_items={'Get Help': None, 'Report a bug': None, 'About': None}
 )
 
+SIDEBAR_TOGGLE_JS = """
+<script>
+(function() {
+    if (window.__sidebarToggleInjected) return;
+    window.__sidebarToggleInjected = true;
+
+    function getSidebar() {
+        return document.querySelector('[data-testid="stSidebar"]');
+    }
+
+    function isCollapsed() {
+        var sb = getSidebar();
+        if (!sb) return false;
+        return sb.getAttribute('aria-expanded') === 'false'
+            || sb.classList.contains('st-emotion-cache-hidden')
+            || getComputedStyle(sb).transform.includes('translateX(-')
+            || getComputedStyle(sb).marginLeft.startsWith('-');
+    }
+
+    function clickOriginalToggle() {
+        // Coba klik tombol toggle bawaan Streamlit
+        var btn = document.querySelector('[data-testid="collapsedControl"] button')
+                || document.querySelector('button[kind="header"]')
+                || document.querySelector('[data-testid="stSidebarCollapsedControl"] button');
+        if (btn) { btn.click(); return true; }
+        // Fallback: toggle class langsung
+        var sb = getSidebar();
+        if (!sb) return false;
+        var expanded = sb.getAttribute('aria-expanded');
+        if (expanded === 'false') {
+            sb.setAttribute('aria-expanded', 'true');
+        } else {
+            sb.setAttribute('aria-expanded', 'false');
+        }
+        return true;
+    }
+
+    function updateIcon() {
+        var btn = document.getElementById('custom-sidebar-toggle');
+        if (!btn) return;
+        btn.innerHTML = isCollapsed() ? '&#9776;' : '&#10005;';
+        btn.title = isCollapsed() ? 'Buka Sidebar' : 'Tutup Sidebar';
+    }
+
+    function injectButton() {
+        if (document.getElementById('custom-sidebar-toggle')) return;
+        var btn = document.createElement('button');
+        btn.id = 'custom-sidebar-toggle';
+        btn.innerHTML = '&#9776;';
+        btn.title = 'Buka/Tutup Sidebar';
+        btn.addEventListener('click', function() {
+            clickOriginalToggle();
+            setTimeout(updateIcon, 300);
+        });
+        document.body.appendChild(btn);
+        updateIcon();
+    }
+
+    // Inject setelah DOM ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', injectButton);
+    } else {
+        setTimeout(injectButton, 500);
+    }
+
+    // Re-inject kalau Streamlit rerun (MutationObserver)
+    var observer = new MutationObserver(function() {
+        injectButton();
+        updateIcon();
+    });
+    observer.observe(document.body, { childList: true, subtree: false });
+})();
+</script>
+"""
+
 KEEP_ALIVE_JS = """
 <script>
 (function() {
@@ -523,7 +599,8 @@ KEEP_ALIVE_JS = """
 """
 
 def inject_keep_alive():
-    st.markdown(KEEP_ALIVE_JS, unsafe_allow_html=True)
+    # Gunakan components.html agar <script> benar-benar dieksekusi browser
+    _stc.html(KEEP_ALIVE_JS + SIDEBAR_TOGGLE_JS, height=0, scrolling=False)
 
 TAB_PERSIST_JS = """
 <script>
@@ -571,7 +648,26 @@ st.markdown("""
     header[data-testid="stHeader"] {display: none !important;}
     div[data-testid="stToolbar"] {display: none !important;}
     .login-page [data-testid="stSidebar"] > div { display: none !important; }
-    [data-testid="collapsedControl"] { display: block !important; visibility: visible !important; z-index: 9999 !important; }
+    #custom-sidebar-toggle {
+        position: fixed !important;
+        top: 10px !important;
+        left: 10px !important;
+        z-index: 999999 !important;
+        width: 36px !important;
+        height: 36px !important;
+        background: #1E88E5 !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        cursor: pointer !important;
+        font-size: 18px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
+        transition: background 0.2s !important;
+    }
+    #custom-sidebar-toggle:hover { background: #1565C0 !important; }
     .main-header { font-size: 2.5rem; color: #1E88E5; text-align: center; margin-bottom: 1.5rem; padding-top: 0.8rem; }
     .sub-header { font-size: 1.5rem; color: #0D47A1; margin-top: 1.5rem; margin-bottom: 1rem; }
     .search-box { background-color: #F5F5F5; padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1.5rem; }
