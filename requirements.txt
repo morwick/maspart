@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+openpyxl
+Pillow
+requests
+pycryptodome
+torch
+torchvision

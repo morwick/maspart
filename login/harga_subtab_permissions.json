@@ -1,0 +1,19 @@
+{
+  "__default__": [
+    "subtab_list_harga",
+    "subtab_cari_harga"
+  ],
+  "mas": [
+    "subtab_list_harga",
+    "subtab_cari_harga",
+    "subtab_batch_harga"
+  ],
+  "banjarmasin": [],
+  "balikpapan": [],
+  "pontianak": [],
+  "palembang": [],
+  "jambi": [],
+  "jakarta": [],
+  "medan": [],
+  "sulawesi": []
+}
