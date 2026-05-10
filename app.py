@@ -59,6 +59,14 @@ except ImportError:
     def render_data_uploader_tab():
         st.warning("⚠️ `admin_data_uploader.py` tidak ditemukan.")
 
+# ── Stok Opname ──────────────────────────────────────────────────────
+try:
+    import stok_opname as _so
+    STOK_OPNAME_ENABLED = True
+except ImportError:
+    STOK_OPNAME_ENABLED = False
+    _so = None
+
 
 warnings.filterwarnings('ignore')
 
@@ -68,9 +76,11 @@ warnings.filterwarnings('ignore')
 ALL_MENU_TABS: dict = {
     "tab_search_pn":   "🔢 Search Part Number",
     "tab_search_name": "📝 Search Part Name",
+    "tab_compare":     "🔍 Bandingkan 2 Part",
     "tab_batch":       "📥 Batch Download",
     "tab_populasi":    "🚛 Populasi Unit",
     "tab_harga":       "💰 Harga",
+    "tab_opname":      "📋 Stok Opname",
 }
 
 # Tab yang SELALU aktif (tidak bisa dinonaktifkan admin)
@@ -438,13 +448,93 @@ def get_allowed_tabs(username: str, role: str) -> list:
     return MenuAccessManager.get_user_tabs(username)
 
 
+def _mac_quick_actions(section_key: str, all_keys: list, locked: set,
+                       current: list, default_keys: list) -> list:
+    """Tombol Pilih Semua / Kosongkan / Pakai Default untuk 1 section.
+    Return list state baru (dari session_state per checkbox)."""
+    state_key = f"_mac_state_{section_key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = list(current)
+
+    btn_cols = st.columns(3)
+    with btn_cols[0]:
+        if st.button("✅ Pilih Semua", key=f"qa_all_{section_key}", use_container_width=True):
+            st.session_state[state_key] = list(all_keys)
+            st.rerun()
+    with btn_cols[1]:
+        if st.button("❌ Kosongkan", key=f"qa_none_{section_key}", use_container_width=True):
+            # Tetap pertahankan yang locked (wajib)
+            st.session_state[state_key] = list(locked)
+            st.rerun()
+    with btn_cols[2]:
+        if st.button("↩️ Pakai Default", key=f"qa_def_{section_key}", use_container_width=True):
+            st.session_state[state_key] = list(default_keys)
+            st.rerun()
+
+    return st.session_state[state_key]
+
+
+def _mac_render_section(title: str, items: list, current: list, default_keys: list,
+                        locked: set, section_key: str) -> list:
+    """Render 1 section (Menu/Kolom/HargaSubtab) dengan quick actions + checkbox.
+    Return list final selection."""
+    st.markdown(f"#### {title}")
+
+    n_total   = len(items)
+    n_picked  = len([k for k, _ in items if k in current])
+    st.caption(f"Aktif: **{n_picked}/{n_total}**")
+
+    state = _mac_quick_actions(section_key, [k for k, _ in items], locked, current, default_keys)
+
+    new_sel: list = []
+    cols = st.columns(2)
+    for i, (key, label) in enumerate(items):
+        with cols[i % 2]:
+            forced = key in locked
+            val = st.checkbox(
+                label=(label + " *(wajib)*") if forced else label,
+                value=True if forced else (key in state),
+                key=f"{section_key}_cb_{key}",
+                disabled=forced,
+                help="Selalu aktif, tidak bisa dimatikan." if forced else "",
+            )
+            if forced or val:
+                new_sel.append(key)
+
+    # Update state agar tombol quick action konsisten dengan klik manual
+    st.session_state[f"_mac_state_{section_key}"] = list(new_sel)
+    return new_sel
+
+
 def render_admin_menu_control_tab():
     """UI tab 🛡️ Menu Control — hanya tampil untuk admin."""
     st.markdown("### 🛡️ Kontrol Akses per User")
     st.caption(
-        "Atur akses menu, kolom, dan sub-tab harga untuk masing-masing user. "
-        "Tab **Search Part Number** selalu aktif dan tidak bisa dinonaktifkan."
+        "Atur akses **menu**, **kolom**, dan **sub-tab harga** per user, "
+        "atau atur **default** untuk semua user yang belum punya konfigurasi khusus. "
+        "Tab **Search Part Number** selalu aktif (tidak bisa dimatikan)."
     )
+
+    # ── Tombol force-refresh dari Supabase ───────────────────────────
+    rc1, rc2 = st.columns([1, 5])
+    with rc1:
+        if st.button("🔄 Refresh", use_container_width=True,
+                     help="Reload permissions terbaru dari Supabase"):
+            for k in ("_menu_permissions_cache",
+                      "_column_permissions_cache",
+                      "_harga_subtab_permissions_cache"):
+                st.session_state.pop(k, None)
+            for k in list(st.session_state.keys()):
+                if k.startswith("_mac_state_"):
+                    st.session_state.pop(k, None)
+            try:
+                if SUPABASE_PERMS_ENABLED:
+                    SupabasePermissions.invalidate(PERM_MENU)
+                    SupabasePermissions.invalidate(PERM_COLUMN)
+                    SupabasePermissions.invalidate(PERM_HARGA)
+            except Exception:
+                pass
+            st.rerun()
 
     df_users: pd.DataFrame = st.session_state.get("login_users_df", pd.DataFrame())
     if df_users.empty:
@@ -463,77 +553,166 @@ def render_admin_menu_control_tab():
     col_items  = list(ALL_COLUMN_ACCESS.items())
     hs_items   = list(ALL_HARGA_SUBTABS.items())
 
-    selected_user = st.selectbox("Pilih Username:", options=non_admin_users, key="mac_sel_user")
+    default_tab_keys = list(ALL_MENU_TABS.keys())
+    default_col_keys = list(ALL_COLUMN_ACCESS.keys())
+    default_hs_keys  = list(ALL_HARGA_SUBTABS.keys())
 
-    if not selected_user:
-        return
+    # ── Mode: edit per-user atau edit default ─────────────────────────
+    mode = st.radio(
+        "Mode edit:",
+        ["👤 Per User", "🌐 Default (untuk semua user baru)"],
+        horizontal=True,
+        key="mac_mode",
+    )
 
-    uname = selected_user.strip().lower()
+    is_default_mode = mode.startswith("🌐")
+
+    if is_default_mode:
+        target = "__default__"
+        target_label = "DEFAULT (semua user baru)"
+    else:
+        selected_user = st.selectbox(
+            "Pilih Username:", options=non_admin_users, key="mac_sel_user",
+        )
+        if not selected_user:
+            return
+        target = selected_user.strip().lower()
+        target_label = target
+
+        # Status badge: punya config khusus atau pakai default?
+        has_specific = target in perms or target in col_perms or target in hs_perms
+        if has_specific:
+            st.markdown(
+                f"<div style='background:#DBEAFE;border-left:3px solid #2563EB;"
+                f"padding:6px 10px;border-radius:4px;margin:4px 0;font-size:.82rem;'>"
+                f"📌 User <b>{target}</b> memiliki konfigurasi khusus.</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='background:#FEF3C7;border-left:3px solid #D97706;"
+                f"padding:6px 10px;border-radius:4px;margin:4px 0;font-size:.82rem;'>"
+                f"ℹ️ User <b>{target}</b> belum punya konfigurasi khusus — saat ini "
+                f"mengikuti pengaturan <b>Default</b>.</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Reset state ketika ganti target/mode ──────────────────────────
+    last_target_key = "_mac_last_target"
+    if st.session_state.get(last_target_key) != target:
+        # Hapus semua state per-checkbox dari section sebelumnya supaya nilai
+        # baru terpasang dari "current"
+        for k in list(st.session_state.keys()):
+            if k.startswith("_mac_state_"):
+                st.session_state.pop(k, None)
+        st.session_state[last_target_key] = target
 
     # ── Akses Menu ────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### 📋 Akses Menu")
-    current_tabs = perms.get(uname, perms.get("__default__", list(ALL_MENU_TABS.keys())))
-    new_selection: list = []
-    cols = st.columns(2)
-    for i, (key, label) in enumerate(tab_items):
-        with cols[i % 2]:
-            forced = key in ALWAYS_ALLOWED
-            val = st.checkbox(
-                label=label + (" *(wajib)*" if forced else ""),
-                value=True if forced else (key in current_tabs),
-                key=f"mac_cb_{uname}_{key}",
-                disabled=forced,
-                help="Tab ini selalu aktif." if forced else "",
-            )
-            if forced or val:
-                new_selection.append(key)
+    cur_tabs = perms.get(target, perms.get("__default__", default_tab_keys))
+    new_selection = _mac_render_section(
+        "📋 Akses Menu", tab_items, cur_tabs, default_tab_keys,
+        locked=ALWAYS_ALLOWED, section_key=f"menu_{target}",
+    )
 
     # ── Akses Kolom ───────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### 🔒 Akses Kolom")
-    cur_cols = col_perms.get(uname, col_perms.get("__default__", list(ALL_COLUMN_ACCESS.keys())))
-    new_col_sel: list = []
-    col_cb = st.columns(2)
-    for i, (ckey, clabel) in enumerate(col_items):
-        with col_cb[i % 2]:
-            cval = st.checkbox(
-                label=clabel,
-                value=(ckey in cur_cols),
-                key=f"cac_cb_{uname}_{ckey}",
-            )
-            if cval:
-                new_col_sel.append(ckey)
+    cur_cols = col_perms.get(target, col_perms.get("__default__", default_col_keys))
+    new_col_sel = _mac_render_section(
+        "🔒 Akses Kolom", col_items, cur_cols, default_col_keys,
+        locked=set(), section_key=f"col_{target}",
+    )
 
     # ── Akses Sub-Tab Harga ───────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### 🔖 Akses Sub-Tab Harga")
-    cur_hs = hs_perms.get(uname, hs_perms.get("__default__", list(ALL_HARGA_SUBTABS.keys())))
-    new_hs_sel: list = []
-    hs_cols = st.columns(2)
-    for i, (hskey, hslabel) in enumerate(hs_items):
-        with hs_cols[i % 2]:
-            hsval = st.checkbox(
-                label=hslabel,
-                value=(hskey in cur_hs),
-                key=f"hsc_cb_{uname}_{hskey}",
-            )
-            if hsval:
-                new_hs_sel.append(hskey)
+    cur_hs = hs_perms.get(target, hs_perms.get("__default__", default_hs_keys))
+    new_hs_sel = _mac_render_section(
+        "🔖 Akses Sub-Tab Harga", hs_items, cur_hs, default_hs_keys,
+        locked=set(), section_key=f"hs_{target}",
+    )
 
-    # ── Tombol Simpan ─────────────────────────────────────────────────
+    # ── Tombol Simpan / Reset ─────────────────────────────────────────
     st.markdown("---")
-    if st.button("💾 Simpan Semua Akses", key=f"mac_save_all_{uname}",
-                 type="primary", use_container_width=True):
-        ok1, err1 = MenuAccessManager.set_user_tabs(uname, new_selection)
-        ok2, err2 = ColumnAccessManager.set_user_columns(uname, new_col_sel)
-        ok3, err3 = HargaSubTabManager.set_user_subtabs(uname, new_hs_sel)
-        if ok1 and ok2 and ok3:
-            st.success(f"✅ Semua akses untuk **{uname}** berhasil disimpan!")
-            st.rerun()
-        else:
-            errors = [e for e in [err1, err2, err3] if e]
-            st.error(f"❌ Gagal menyimpan: {', '.join(errors)}")
+    bc1, bc2 = st.columns([2, 1])
+    with bc1:
+        save_label = (
+            "💾 Simpan Akses Default"
+            if is_default_mode
+            else f"💾 Simpan Akses untuk {target_label}"
+        )
+        if st.button(save_label, key=f"mac_save_{target}",
+                     type="primary", use_container_width=True):
+            results = []
+            if is_default_mode:
+                results.append(MenuAccessManager.set_default_tabs(new_selection))
+                results.append(ColumnAccessManager.set_default_columns(new_col_sel))
+                results.append(HargaSubTabManager.set_default_subtabs(new_hs_sel))
+            else:
+                results.append(MenuAccessManager.set_user_tabs(target, new_selection))
+                results.append(ColumnAccessManager.set_user_columns(target, new_col_sel))
+                results.append(HargaSubTabManager.set_user_subtabs(target, new_hs_sel))
+
+            errs = [err for ok, err in results if not ok and err]
+            all_ok = all(ok for ok, _ in results)
+            if all_ok:
+                # Force re-fetch dari DB pada render berikutnya supaya yang
+                # ditampilkan = state DB sebenarnya
+                for k in ("_menu_permissions_cache",
+                          "_column_permissions_cache",
+                          "_harga_subtab_permissions_cache"):
+                    st.session_state.pop(k, None)
+                if SUPABASE_PERMS_ENABLED:
+                    try:
+                        SupabasePermissions.invalidate(PERM_MENU)
+                        SupabasePermissions.invalidate(PERM_COLUMN)
+                        SupabasePermissions.invalidate(PERM_HARGA)
+                    except Exception:
+                        pass
+                st.success(f"✅ Akses untuk **{target_label}** disimpan.")
+                st.rerun()
+            else:
+                st.error(f"❌ Gagal menyimpan: {', '.join(errs) or 'unknown error'}")
+
+    with bc2:
+        if not is_default_mode:
+            if st.button("🗑️ Hapus Konfigurasi User", key=f"mac_remove_{target}",
+                         use_container_width=True,
+                         help="User akan kembali pakai pengaturan Default"):
+                results = [
+                    MenuAccessManager.remove_user_config(target),
+                    ColumnAccessManager.remove_user_config(target),
+                    HargaSubTabManager.remove_user_config(target),
+                ]
+                if all(ok for ok, _ in results):
+                    for k in ("_menu_permissions_cache",
+                              "_column_permissions_cache",
+                              "_harga_subtab_permissions_cache"):
+                        st.session_state.pop(k, None)
+                    st.success(f"✅ Konfigurasi {target} dihapus, kembali ke Default.")
+                    st.rerun()
+                else:
+                    errs = [e for ok, e in results if not ok and e]
+                    st.error(f"❌ Gagal hapus: {', '.join(errs) or 'unknown'}")
+
+    # ── Overview semua user ───────────────────────────────────────────
+    with st.expander("📊 Overview Akses Semua User", expanded=False):
+        rows = []
+        all_tabs_keys = list(ALL_MENU_TABS.keys())
+        for u in non_admin_users:
+            uname = u.strip().lower()
+            user_tabs = perms.get(uname, perms.get("__default__", all_tabs_keys))
+            row = {
+                "User":    u,
+                "Konfig":  "Khusus" if uname in perms else "Default",
+                "Jml Tab": f"{len(user_tabs)}/{len(all_tabs_keys)}",
+            }
+            for tk, tlabel in ALL_MENU_TABS.items():
+                # Ambil emoji/teks pendek dari label
+                short = tlabel.split(" ", 1)[0]
+                row[short] = "✅" if tk in user_tabs else "—"
+            rows.append(row)
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 
@@ -1677,6 +1856,818 @@ class ExcelSearchApp:
                 else:
                     st.warning("Masukkan nama part untuk mencari.")
 
+    # ── Tab: Bandingkan 2 Part (Interchange Analyzer) ────────────────
+    def _render_tab_compare_parts(self):
+        try:
+            import part_compare as _pc
+        except Exception as e:
+            st.error(f"Modul perbandingan tidak tersedia: {e}")
+            return
+
+        st.markdown("### 🔄 Bandingkan 2 Part — Cek Interchange")
+        st.markdown(
+            "<div style='color:#555;font-size:.9rem;margin-bottom:8px;'>"
+            "Masukkan 2 Part Number. Sistem mengambil foto + nama part dari SIMS, "
+            "lalu menilai apakah kedua part kemungkinan <b>interchangeable</b> "
+            "berdasarkan kemiripan <b>BENTUK</b> (utama), <b>NAMA</b>, dan <b>WARNA</b> (info)."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        if not SIMS_ENABLED:
+            st.warning("⚠️ SIMS Fetcher tidak aktif — fitur ini membutuhkan akses SIMS.")
+            return
+
+        with st.form(key="compare_parts_form", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                pn1_input = st.text_input(
+                    "Part Number #1:",
+                    placeholder="Contoh: WG1642821034",
+                    key="compare_pn1_input",
+                )
+            with c2:
+                pn2_input = st.text_input(
+                    "Part Number #2:",
+                    placeholder="Contoh: WG1642821035",
+                    key="compare_pn2_input",
+                )
+            submitted = st.form_submit_button(
+                "🔬 Cek Interchange",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if submitted:
+            pn1 = (pn1_input or "").strip()
+            pn2 = (pn2_input or "").strip()
+            if not pn1 or not pn2:
+                st.warning("Mohon isi kedua Part Number.")
+                return
+            if pn1.upper() == pn2.upper():
+                st.warning("Part Number tidak boleh sama.")
+                return
+
+            # ── Ambil daftar URL gambar + part info dari SIMS ─────────
+            with st.spinner(f"🔍 Ambil data SIMS untuk {pn1} & {pn2}..."):
+                urls1, err1 = _sims_fetch(pn1)
+                urls2, err2 = _sims_fetch(pn2)
+                name1 = ""
+                name2 = ""
+                try:
+                    from sims_fetcher import get_sims_part_info
+                    info1, _ = get_sims_part_info(pn1)
+                    info2, _ = get_sims_part_info(pn2)
+                    name1 = (info1 or {}).get("partName", "") or ""
+                    name2 = (info2 or {}).get("partName", "") or ""
+                except Exception as e:
+                    print(f"[compare] partName fetch gagal: {e}")
+
+            if err1:
+                st.error(f"❌ {pn1}: {err1}")
+            if err2:
+                st.error(f"❌ {pn2}: {err2}")
+            if not urls1:
+                st.error(f"❌ Tidak ada gambar SIMS untuk {pn1}.")
+                return
+            if not urls2:
+                st.error(f"❌ Tidak ada gambar SIMS untuk {pn2}.")
+                return
+
+            # ── Download bytes setiap gambar (parallel) ───────────────
+            with st.spinner("⬇️ Mengunduh gambar..."):
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    futs1 = {ex.submit(ExcelSearchApp.fetch_image_bytes, u): i for i, u in enumerate(urls1)}
+                    futs2 = {ex.submit(ExcelSearchApp.fetch_image_bytes, u): i for i, u in enumerate(urls2)}
+                    bytes1 = [None] * len(urls1)
+                    bytes2 = [None] * len(urls2)
+                    for f in as_completed(futs1):
+                        i = futs1[f]
+                        try:
+                            b, _ = f.result()
+                            bytes1[i] = b
+                        except Exception:
+                            bytes1[i] = None
+                    for f in as_completed(futs2):
+                        i = futs2[f]
+                        try:
+                            b, _ = f.result()
+                            bytes2[i] = b
+                        except Exception:
+                            bytes2[i] = None
+
+            valid1 = [b for b in bytes1 if b]
+            valid2 = [b for b in bytes2 if b]
+            if not valid1 or not valid2:
+                st.error("❌ Gagal mengunduh konten gambar dari SIMS.")
+                return
+
+            # ── Analisis kemiripan ────────────────────────────────────
+            with st.spinner("🧠 Menganalisis kemiripan (bentuk + nama + warna)..."):
+                result = _pc.best_match(bytes1, bytes2, name1=name1, name2=name2)
+
+            best  = result.get("best")
+            pairs = result.get("pairs") or []
+            if not best:
+                st.error("❌ Tidak dapat menganalisis pasangan gambar manapun.")
+                return
+
+            st.session_state["_compare_result"] = {
+                "pn1": pn1, "pn2": pn2,
+                "name1": name1, "name2": name2,
+                "urls1": urls1, "urls2": urls2,
+                "bytes1": bytes1, "bytes2": bytes2,
+                "best": best, "pairs": pairs,
+            }
+
+        # ── Render hasil (jika ada) ──────────────────────────────────
+        cmp = st.session_state.get("_compare_result")
+        if not cmp:
+            return
+
+        pn1, pn2   = cmp["pn1"], cmp["pn2"]
+        name1      = cmp.get("name1", "") or ""
+        name2      = cmp.get("name2", "") or ""
+        bytes1     = cmp["bytes1"]
+        bytes2     = cmp["bytes2"]
+        urls1      = cmp["urls1"]
+        urls2      = cmp["urls2"]
+        best       = cmp["best"]
+        pairs      = cmp["pairs"]
+
+        st.divider()
+
+        # ── Verdict utama (interchange) ──────────────────────────────
+        verdict = best["verdict"]
+        vcolor  = best["color"]
+        shape   = best["shape_score"]
+        color_s = best["color_score"]
+        name_s  = best.get("name_score")
+        st.markdown(
+            f"""
+<div style="
+    background:linear-gradient(90deg,{vcolor}22,{vcolor}08);
+    border-left:6px solid {vcolor};
+    padding:14px 18px;border-radius:10px;margin:8px 0 16px 0;">
+  <div style="font-size:.85rem;color:#555;">Hasil Analisis Interchange</div>
+  <div style="font-size:1.7rem;font-weight:700;color:{vcolor};line-height:1.15;">
+    {verdict}
+  </div>
+  <div style="font-size:.8rem;color:#666;margin-top:6px;">
+    Pasangan foto terbaik: gambar #{best['i']+1} ({pn1}) vs #{best['j']+1} ({pn2})
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        # ── 3 sinyal terpisah: Bentuk / Nama / Warna ─────────────────
+        def _signal_color(v):
+            if v is None:        return "#9CA3AF"
+            if v >= 0.75:        return "#16A34A"
+            if v >= 0.55:        return "#CA8A04"
+            return "#DC2626"
+
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            c = _signal_color(shape)
+            st.markdown(
+                f"""
+<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;text-align:center;">
+  <div style="font-size:.78rem;color:#6b7280;">🔧 BENTUK (penentu utama)</div>
+  <div style="font-size:1.8rem;font-weight:700;color:{c};">{shape*100:.1f}%</div>
+  <div style="font-size:.72rem;color:#888;">pHash + dHash + SSIM + edge + aspect</div>
+</div>""",
+                unsafe_allow_html=True,
+            )
+        with s2:
+            if name_s is None:
+                st.markdown(
+                    """
+<div style="border:1px dashed #d1d5db;border-radius:10px;padding:12px;text-align:center;">
+  <div style="font-size:.78rem;color:#6b7280;">📝 NAMA PART</div>
+  <div style="font-size:1.4rem;font-weight:600;color:#9CA3AF;">N/A</div>
+  <div style="font-size:.72rem;color:#888;">partName SIMS tidak tersedia</div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+            else:
+                c = _signal_color(name_s)
+                st.markdown(
+                    f"""
+<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;text-align:center;">
+  <div style="font-size:.78rem;color:#6b7280;">📝 NAMA PART (penguat)</div>
+  <div style="font-size:1.8rem;font-weight:700;color:{c};">{name_s*100:.1f}%</div>
+  <div style="font-size:.72rem;color:#888;">SequenceMatcher + token Jaccard</div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+        with s3:
+            c = _signal_color(color_s)
+            st.markdown(
+                f"""
+<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;text-align:center;">
+  <div style="font-size:.78rem;color:#6b7280;">🎨 WARNA (info saja)</div>
+  <div style="font-size:1.8rem;font-weight:700;color:{c};">{color_s*100:.1f}%</div>
+  <div style="font-size:.72rem;color:#888;">histogram + mean color</div>
+</div>""",
+                unsafe_allow_html=True,
+            )
+
+        # ── Disclaimer ───────────────────────────────────────────────
+        st.markdown(
+            """
+<div style="background:#FFFBEB;border-left:4px solid #F59E0B;padding:8px 12px;
+            border-radius:6px;margin:10px 0;font-size:.82rem;color:#92400E;">
+⚠️ <b>Catatan:</b> Analisis ini berbasis foto SIMS — hanya indikator awal interchange.
+Verifikasi fisik (dimensi, threading, material) dan cross-reference dokumen OEM
+tetap diperlukan sebelum keputusan final.
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        # ── PartName side-by-side ────────────────────────────────────
+        if name1 or name2:
+            n1c, n2c = st.columns(2)
+            with n1c:
+                st.markdown(
+                    f"<div style='background:#F3F4F6;padding:8px 12px;border-radius:6px;'>"
+                    f"<div style='font-size:.72rem;color:#6b7280;'>Part Name {pn1}</div>"
+                    f"<div style='font-size:.95rem;font-weight:600;'>{(name1 or '—')}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with n2c:
+                st.markdown(
+                    f"<div style='background:#F3F4F6;padding:8px 12px;border-radius:6px;'>"
+                    f"<div style='font-size:.72rem;color:#6b7280;'>Part Name {pn2}</div>"
+                    f"<div style='font-size:.95rem;font-weight:600;'>{(name2 or '—')}</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+        # ── Foto pasangan terbaik berdampingan ───────────────────────
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"**🅰️ {pn1}** — gambar #{best['i']+1}")
+            try:
+                ExcelSearchApp.render_zoomable_image(
+                    bytes1[best["i"]],
+                    caption=f"{pn1} (gbr {best['i']+1}/{len(urls1)})",
+                    zoom_key=f"cmp_a_{best['i']}",
+                )
+            except Exception as e:
+                st.error(f"Gagal render gambar A: {e}")
+        with col_b:
+            st.markdown(f"**🅱️ {pn2}** — gambar #{best['j']+1}")
+            try:
+                ExcelSearchApp.render_zoomable_image(
+                    bytes2[best["j"]],
+                    caption=f"{pn2} (gbr {best['j']+1}/{len(urls2)})",
+                    zoom_key=f"cmp_b_{best['j']}",
+                )
+            except Exception as e:
+                st.error(f"Gagal render gambar B: {e}")
+
+        # ── Detail sub-metrik shape & color ──────────────────────────
+        with st.expander("📊 Detail Sub-Metrik (bentuk & warna)"):
+            metrics = best["metrics"]
+            labels  = _pc.METRIC_LABELS
+
+            shape_keys = list(_pc.SHAPE_WEIGHTS.keys())
+            color_keys = list(_pc.COLOR_WEIGHTS.keys())
+
+            st.markdown("**🔧 Sub-metrik BENTUK**")
+            df_shape = pd.DataFrame([
+                {
+                    "Metrik":     labels.get(k, k),
+                    "Skor":       f"{metrics[k]*100:.1f}%",
+                    "Bobot":      f"{_pc.SHAPE_WEIGHTS[k]*100:.0f}%",
+                    "Kontribusi": f"{metrics[k]*_pc.SHAPE_WEIGHTS[k]*100:.1f}%",
+                } for k in shape_keys
+            ])
+            st.dataframe(df_shape, hide_index=True, use_container_width=True)
+
+            for k in shape_keys:
+                v = metrics[k]
+                pct = max(0.0, min(1.0, float(v))) * 100
+                bar = "#16A34A" if v >= 0.7 else ("#CA8A04" if v >= 0.5 else "#DC2626")
+                st.markdown(
+                    f"""
+<div style="margin:4px 0;">
+  <div style="display:flex;justify-content:space-between;font-size:.78rem;color:#444;">
+    <span>{labels.get(k, k)}</span><span><b>{pct:.1f}%</b></span>
+  </div>
+  <div style="background:#eee;border-radius:6px;height:8px;overflow:hidden;">
+    <div style="width:{pct:.1f}%;background:{bar};height:100%;"></div>
+  </div>
+</div>""",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("**🎨 Sub-metrik WARNA** (info saja, bobot kecil di overall)")
+            df_color = pd.DataFrame([
+                {
+                    "Metrik":     labels.get(k, k),
+                    "Skor":       f"{metrics[k]*100:.1f}%",
+                    "Bobot":      f"{_pc.COLOR_WEIGHTS[k]*100:.0f}%",
+                } for k in color_keys
+            ])
+            st.dataframe(df_color, hide_index=True, use_container_width=True)
+
+        # ── Info teknis ──────────────────────────────────────────────
+        extras = best.get("extras", {})
+        with st.expander("🔬 Info Teknis"):
+            st.markdown(
+                f"- **Resolusi gambar #1:** {best.get('size1')}\n"
+                f"- **Resolusi gambar #2:** {best.get('size2')}\n"
+                f"- **Hamming pHash:** {extras.get('hamming_phash')}/64\n"
+                f"- **Hamming dHash:** {extras.get('hamming_dhash')}/64\n"
+                f"- **Hamming aHash:** {extras.get('hamming_ahash')}/64\n"
+                f"- **Edge density #1:** {extras.get('edge1', 0):.4f}\n"
+                f"- **Edge density #2:** {extras.get('edge2', 0):.4f}\n"
+                f"- **Mean RGB #1:** {[round(x,1) for x in extras.get('mean_rgb1', [])]}\n"
+                f"- **Mean RGB #2:** {[round(x,1) for x in extras.get('mean_rgb2', [])]}\n"
+            )
+
+        # ── Tabel semua kombinasi pasangan ───────────────────────────
+        if len(pairs) > 1:
+            with st.expander(f"📋 Semua Kombinasi Pasangan ({len(pairs)})"):
+                df_pairs = pd.DataFrame([
+                    {
+                        f"Gbr {pn1}": p["i"] + 1,
+                        f"Gbr {pn2}": p["j"] + 1,
+                        "Bentuk":  f"{p['shape_score']*100:.1f}%",
+                        "Warna":   f"{p['color_score']*100:.1f}%",
+                        "Overall": f"{p['overall']*100:.1f}%",
+                        "Verdict": p["verdict"],
+                    }
+                    for p in sorted(pairs, key=lambda x: -x["shape_score"])
+                ])
+                st.dataframe(df_pairs, hide_index=True, use_container_width=True)
+
+        if st.button("🗑️ Bersihkan Hasil", key="compare_clear_btn"):
+            st.session_state.pop("_compare_result", None)
+            st.rerun()
+
+    # ── Tab: Stok Opname (per user) ──────────────────────────────────
+    def _render_tab_stok_opname(self):
+        if not STOK_OPNAME_ENABLED or _so is None:
+            st.error("Modul `stok_opname.py` tidak ditemukan.")
+            return
+
+        user = LoginManager.get_current_user()
+        if not user:
+            st.warning("Anda harus login untuk menggunakan fitur ini.")
+            return
+        username = user["username"]
+
+        st.markdown(f"### 📋 Stok Opname — `{username}`")
+
+        try:
+            _be = _so.backend()
+        except Exception:
+            _be = "file"
+        if _be == "supabase":
+            _be_badge = "<span style='background:#DCFCE7;color:#166534;padding:2px 8px;border-radius:6px;font-size:.72rem;'>☁️ Supabase</span>"
+        else:
+            _be_badge = "<span style='background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:6px;font-size:.72rem;'>💾 File lokal</span>"
+
+        st.markdown(
+            f"<div style='color:#555;font-size:.9rem;margin-bottom:8px;'>"
+            f"Sesi opname tersimpan <b>per user</b> di {_be_badge}. Setiap sesi dimulai dengan "
+            f"<b>upload data stok awal sendiri</b> (Excel: PN + Qty Sistem). "
+            f"Setelah itu Anda mengisi qty hasil hitung fisik secara <b>manual</b> "
+            f"atau <b>upload Excel</b>. Setelah difinalisasi sesi masuk <b>Riwayat Opname</b>."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Part name lookup tambahan (best-effort dari cache SIMS yg sudah ada)
+        part_name_lookup = {}
+        try:
+            from sims_fetcher import _load_part_info_json
+            cache_pi = _load_part_info_json() or {}
+            for pn, info in cache_pi.items():
+                if isinstance(info, dict):
+                    pname = info.get("partName", "")
+                    if pname:
+                        part_name_lookup[str(pn).strip().upper()] = pname
+        except Exception:
+            pass
+
+        draft   = _so.load_draft(username)
+        history = _so.load_history(username)
+
+        # ── Banner sesi aktif / form upload data stok awal ───────────
+        if draft is None:
+            self._render_opname_init_upload(username)
+        else:
+            self._render_opname_session(username, draft, {}, part_name_lookup)
+
+        # ── Riwayat opname ───────────────────────────────────────────
+        st.divider()
+        st.markdown("#### 🗂️ Riwayat Opname Saya")
+        if not history:
+            st.caption("Belum ada riwayat sesi yang difinalisasi.")
+            return
+
+        rows = []
+        for s in history:
+            sm = s.get("summary") or _so.summarize(s)
+            rows.append({
+                "Session ID":    s.get("session_id", "")[:8],
+                "Difinalisasi":  s.get("finalized_at", "—"),
+                "Total PN":      sm.get("total", 0),
+                "Sudah Hitung":  sm.get("counted", 0),
+                "Cocok":         sm.get("match", 0),
+                "Berselisih":    sm.get("diff_count", 0),
+                "Selisih Net":   sm.get("selisih_net", 0),
+                "_full_id":      s.get("session_id", ""),
+            })
+        df_hist = pd.DataFrame(rows)
+        st.dataframe(df_hist.drop(columns=["_full_id"]), hide_index=True, use_container_width=True)
+
+        with st.expander("📥 Download / Hapus Riwayat"):
+            for s in history:
+                sid_full = s.get("session_id", "")
+                sid      = sid_full[:8]
+                fin_at   = s.get("finalized_at", "—")
+                col1, col2, col3 = st.columns([3, 1, 1])
+                with col1:
+                    st.markdown(f"**{sid}** — {fin_at}")
+                with col2:
+                    try:
+                        xls_bytes = _so.make_report_excel(s, part_name_lookup)
+                        st.download_button(
+                            "⬇️ Excel",
+                            data=xls_bytes,
+                            file_name=f"opname_{username}_{sid}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"opname_dl_{sid_full}",
+                            use_container_width=True,
+                        )
+                    except Exception as e:
+                        st.error(f"Err: {e}")
+                with col3:
+                    if st.button("🗑️", key=f"opname_del_{sid_full}", help="Hapus dari riwayat", use_container_width=True):
+                        if _so.delete_history_entry(username, sid_full):
+                            st.success("Dihapus.")
+                            st.rerun()
+                        else:
+                            st.error("Gagal hapus.")
+
+    def _render_opname_init_upload(self, username: str):
+        """Form awal: user upload Excel data stok awal, lalu buat sesi."""
+        st.info("Belum ada sesi opname aktif. Mulai dengan **upload data stok** Anda.")
+
+        st.markdown("**Langkah 1 — Download template (opsional)**")
+        try:
+            tpl = _so.make_initial_template_excel()
+            st.download_button(
+                "📄 Download Template Stok Awal",
+                data=tpl,
+                file_name="template_stok_awal.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="opname_dl_init_tpl",
+            )
+        except Exception as e:
+            st.error(f"Gagal generate template: {e}")
+
+        st.markdown("**Langkah 2 — Upload data stok awal**")
+        st.caption(
+            "Format: kolom **Part Number**, **Qty Sistem** (atau **Stok**), "
+            "dan opsional **Part Name**. Header bebas posisi; jika tanpa header, "
+            "sistem akan pakai kolom A=PN, B=Qty, C=Part Name."
+        )
+        uploaded = st.file_uploader(
+            "📤 Upload Excel data stok awal",
+            type=["xlsx", "xls", "xlsm"],
+            key="opname_init_upload",
+        )
+        if uploaded is None:
+            return
+
+        try:
+            content = uploaded.read()
+        except Exception as e:
+            st.error(f"Gagal baca file: {e}")
+            return
+
+        parsed, warns = _so.parse_stok_upload(content)
+        for w in warns:
+            st.warning(w)
+
+        if not parsed:
+            st.error("❌ Tidak ada data valid pada file. Periksa format dan coba lagi.")
+            return
+
+        # ── Preview ──────────────────────────────────────────────────
+        st.success(f"✅ {len(parsed)} Part Number terbaca dari file.")
+        df_prev = pd.DataFrame([
+            {
+                "Part Number": pn,
+                "Part Name":   p.get("part_name", ""),
+                "Qty Sistem":  p.get("qty_sistem"),
+            }
+            for pn, p in parsed.items()
+        ])
+        with st.expander(f"👁️ Preview Data ({len(df_prev)} baris)", expanded=True):
+            st.dataframe(df_prev.head(200), hide_index=True, use_container_width=True)
+            if len(df_prev) > 200:
+                st.caption(f"...dan {len(df_prev) - 200} baris lainnya.")
+
+        # Statistik singkat
+        n_zero  = sum(1 for p in parsed.values() if (p.get("qty_sistem") or 0) == 0)
+        n_none  = sum(1 for p in parsed.values() if p.get("qty_sistem") is None)
+        n_named = sum(1 for p in parsed.values() if (p.get("part_name") or "").strip())
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total PN", len(parsed))
+        c2.metric("Qty kosong/N/A", n_none)
+        c3.metric("Qty 0", n_zero)
+        c4.metric("Punya Part Name", n_named)
+
+        st.markdown("---")
+        if st.button("✅ Buat Sesi Opname dari Data Ini", type="primary",
+                     use_container_width=True, key="opname_create_from_upload"):
+            new_sess = _so.build_new_session(parsed, username, source_filename=uploaded.name)
+            ok, err = _so.save_draft(username, new_sess)
+            if not ok:
+                self._opname_show_save_error(err)
+            else:
+                st.success(f"✅ Sesi baru dibuat — {len(new_sess['items'])} PN siap diopname.")
+                st.rerun()
+
+    def _opname_show_save_error(self, err: str):
+        """Tampilkan error simpan opname + hint actionable."""
+        e = (err or "").lower()
+        is_missing_table = (
+            "pgrst205" in e
+            or "could not find the table" in e
+            or ("404" in e and "opname_sessions" in e)
+        )
+        if is_missing_table:
+            st.error("❌ Tabel `opname_sessions` belum ada di Supabase.")
+            st.markdown(
+                "**Cara fix:** buka Supabase Dashboard → SQL Editor → paste & Run "
+                "isi file `migrations/002_opname.sql` (atau klik expander di bawah)."
+            )
+            with st.expander("📋 SQL migrasi (klik untuk copy)", expanded=False):
+                st.code(
+                    """CREATE TABLE IF NOT EXISTS opname_sessions (
+    id           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    session_id   UUID        NOT NULL UNIQUE,
+    username     TEXT        NOT NULL,
+    is_draft     BOOLEAN     NOT NULL DEFAULT TRUE,
+    payload      JSONB       NOT NULL,
+    started_at   TIMESTAMPTZ,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finalized_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_opname_user_draft
+    ON opname_sessions (username) WHERE is_draft = TRUE;
+CREATE INDEX IF NOT EXISTS idx_opname_user_history
+    ON opname_sessions (username, finalized_at DESC) WHERE is_draft = FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_opname_one_draft_per_user
+    ON opname_sessions (username) WHERE is_draft = TRUE;""",
+                    language="sql",
+                )
+        else:
+            st.error(f"Gagal menyimpan sesi: {err}")
+
+    def _render_opname_session(self, username: str, draft: dict, stok_cache: dict, part_name_lookup: dict):
+        """Render UI untuk 1 sesi opname draft yang aktif."""
+        items = draft.get("items", {}) or {}
+        summary = _so.summarize(draft)
+
+        # ── Header info ──────────────────────────────────────────────
+        src_file = draft.get("source_filename", "")
+        src_html = f" • Sumber data: <code>{src_file}</code>" if src_file else ""
+        st.markdown(
+            f"""
+<div style="background:#EEF2FF;border-left:4px solid #4F46E5;padding:8px 12px;
+            border-radius:6px;margin:6px 0;font-size:.85rem;">
+🟢 <b>Sesi aktif</b> — dibuat <code>{draft.get('started_at','—')}</code>,
+update terakhir <code>{draft.get('updated_at','—')}</code>{src_html}
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        # ── Summary cards ────────────────────────────────────────────
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total PN", summary["total"])
+        m2.metric("Sudah Dihitung", summary["counted"], f"-{summary['uncounted']} blm")
+        m3.metric("Cocok", summary["match"])
+        m4.metric("Berselisih", summary["diff_count"])
+        m5.metric("Selisih Net", summary["selisih_net"])
+
+        # ── Sub-tabs: Manual / Upload / Selisih ──────────────────────
+        st_input, st_upload, st_diff = st.tabs([
+            "📝 Ketik Manual",
+            "📤 Upload Excel",
+            "📊 Selisih & Belum Dihitung",
+        ])
+
+        with st_input:
+            self._render_opname_manual(username, draft, items, part_name_lookup)
+        with st_upload:
+            self._render_opname_upload(username, draft, items, part_name_lookup)
+        with st_diff:
+            self._render_opname_diff(items, part_name_lookup)
+
+        # ── Action buttons (finalize / cancel) ───────────────────────
+        st.divider()
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            if st.button("💾 Simpan Draft", use_container_width=True, key="opname_save_btn"):
+                ok, err = _so.save_draft(username, draft)
+                if ok:
+                    st.success("✅ Draft disimpan.")
+                else:
+                    self._opname_show_save_error(err)
+        with c2:
+            if st.button("✅ Finalisasi Sesi", type="primary", use_container_width=True, key="opname_final_btn"):
+                if summary["counted"] == 0:
+                    st.warning("Belum ada PN yang dihitung. Isi minimal 1 qty fisik.")
+                else:
+                    ok, err = _so.finalize_session(username, draft)
+                    if ok:
+                        st.success("✅ Sesi difinalisasi & masuk Riwayat.")
+                        st.rerun()
+                    else:
+                        self._opname_show_save_error(err)
+        with c3:
+            if st.button("🗑️ Batal & Hapus Draft", use_container_width=True, key="opname_cancel_btn"):
+                if _so.delete_draft(username):
+                    st.success("Draft dihapus.")
+                    st.rerun()
+                else:
+                    st.error("Gagal hapus draft.")
+
+    def _render_opname_manual(self, username: str, draft: dict, items: dict, part_name_lookup: dict):
+        st.caption("Edit kolom **Qty Fisik** dan **Note** langsung di tabel. Klik **Simpan** untuk persist.")
+
+        # Filter
+        fc1, fc2 = st.columns([2, 1])
+        with fc1:
+            search_pn = st.text_input(
+                "🔍 Filter Part Number / Part Name",
+                key="opname_filter_pn",
+                placeholder="Ketik untuk filter...",
+            )
+        with fc2:
+            show_only_uncounted = st.checkbox("Hanya yang belum dihitung", key="opname_only_uncounted")
+
+        df_full = _so.items_to_df(items, part_name_lookup)
+
+        df_view = df_full
+        if search_pn:
+            q = search_pn.strip().upper()
+            df_view = df_view[
+                df_view["Part Number"].astype(str).str.upper().str.contains(q, na=False)
+                | df_view["Part Name"].astype(str).str.upper().str.contains(q, na=False)
+            ]
+        if show_only_uncounted:
+            df_view = df_view[df_view["Qty Fisik"].isna()]
+
+        if df_view.empty:
+            st.info("Tidak ada PN yang cocok dengan filter.")
+            return
+
+        st.caption(f"Menampilkan {len(df_view)} dari {len(df_full)} PN.")
+
+        edited = st.data_editor(
+            df_view,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={
+                "Part Number": st.column_config.TextColumn(disabled=True, width="medium"),
+                "Part Name":   st.column_config.TextColumn(disabled=True, width="large"),
+                "Qty Sistem":  st.column_config.NumberColumn(disabled=True, width="small"),
+                "Qty Fisik":   st.column_config.NumberColumn(width="small", min_value=0, step=1),
+                "Selisih":     st.column_config.NumberColumn(disabled=True, width="small"),
+                "Note":        st.column_config.TextColumn(width="medium"),
+            },
+            key="opname_editor",
+        )
+
+        if st.button("💾 Simpan Perubahan", type="primary", key="opname_apply_manual"):
+            new_items = _so.df_to_items(edited, items)
+            draft["items"] = new_items
+            ok, err = _so.save_draft(username, draft)
+            if ok:
+                st.success("✅ Perubahan tersimpan.")
+                st.rerun()
+            else:
+                st.error(f"Gagal simpan: {err}")
+
+    def _render_opname_upload(self, username: str, draft: dict, items: dict, part_name_lookup: dict):
+        st.caption("Download template, isi kolom **Qty Fisik** (dan **Note** opsional), lalu upload kembali.")
+
+        # Template download
+        try:
+            tpl_bytes = _so.make_template_excel(draft, part_name_lookup)
+            st.download_button(
+                "📄 Download Template Opname",
+                data=tpl_bytes,
+                file_name=f"template_opname_{username}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="opname_dl_template",
+            )
+        except Exception as e:
+            st.error(f"Gagal generate template: {e}")
+
+        st.markdown("---")
+
+        uploaded = st.file_uploader(
+            "📤 Upload Excel hasil opname",
+            type=["xlsx", "xls", "xlsm"],
+            key="opname_upload_file",
+        )
+        if uploaded is None:
+            return
+
+        try:
+            content = uploaded.read()
+        except Exception as e:
+            st.error(f"Gagal baca file: {e}")
+            return
+
+        parsed, warns = _so.parse_uploaded_excel(content)
+        for w in warns:
+            st.warning(w)
+
+        if not parsed:
+            return
+
+        st.info(f"📥 {len(parsed)} baris terbaca dari Excel.")
+
+        merge_mode = st.radio(
+            "Mode merge:",
+            [
+                "🔁 Replace (overwrite qty fisik existing)",
+                "➕ Hanya isi yang masih kosong",
+            ],
+            horizontal=False,
+            key="opname_upload_mode",
+        )
+
+        if st.button("✅ Terapkan ke Sesi", type="primary", key="opname_apply_upload"):
+            new_items = dict(items)
+            applied   = 0
+            unmatched = 0
+            skipped   = 0
+            for pn, payload in parsed.items():
+                if pn not in new_items:
+                    unmatched += 1
+                    continue
+                qf  = payload.get("qty_fisik")
+                cur = new_items[pn].get("qty_fisik")
+                if "kosong" in merge_mode and cur is not None:
+                    skipped += 1
+                    continue
+                new_items[pn]["qty_fisik"] = qf
+                note = payload.get("note", "")
+                if note:
+                    new_items[pn]["note"] = note
+                applied += 1
+
+            draft["items"] = new_items
+            ok, err = _so.save_draft(username, draft)
+            if not ok:
+                st.error(f"Gagal simpan: {err}")
+                return
+
+            st.success(
+                f"✅ {applied} PN diupdate"
+                + (f", {skipped} dilewati (sudah terisi)" if skipped else "")
+                + (f", {unmatched} PN tidak ada di sesi" if unmatched else "")
+                + "."
+            )
+            st.rerun()
+
+    def _render_opname_diff(self, items: dict, part_name_lookup: dict):
+        df_all = _so.items_to_df(items, part_name_lookup)
+        if df_all.empty:
+            st.info("Belum ada data.")
+            return
+
+        df_diff = df_all[(df_all["Selisih"].notna()) & (df_all["Selisih"] != 0)]
+        df_unc  = df_all[df_all["Qty Fisik"].isna()]
+
+        st.markdown(f"**📊 PN Berselisih — {len(df_diff)} item**")
+        if df_diff.empty:
+            st.caption("Tidak ada selisih.")
+        else:
+            df_show = df_diff.copy()
+            df_show = df_show.sort_values("Selisih", key=lambda s: s.abs(), ascending=False)
+            st.dataframe(df_show, hide_index=True, use_container_width=True)
+
+        st.markdown(f"**🕒 Belum Dihitung — {len(df_unc)} item**")
+        if df_unc.empty:
+            st.caption("Semua PN sudah dihitung.")
+        else:
+            st.dataframe(df_unc[["Part Number", "Part Name", "Qty Sistem"]], hide_index=True, use_container_width=True)
+
     # ── Batch Download Tab ───────────────────────────────────────────
     def render_batch_download_tab(self):
         st.markdown("### 📥 Batch Download")
@@ -2313,9 +3304,11 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
         ALL_TAB_DEFS = [
             ("tab_search_pn",   "🔢 Search Part Number", "_render_tab_search_pn"),
             ("tab_search_name", "📝 Search Part Name",    "_render_tab_search_name"),
+            ("tab_compare",     "🔍 Bandingkan 2 Part",   "_render_tab_compare_parts"),
             ("tab_batch",       "📥 Batch Download",      "render_batch_download_tab"),
             ("tab_populasi",    "🚛 Populasi Unit",       "render_populasi_tab"),
             ("tab_harga",       "💰 Harga",               "render_harga_tab"),
+            ("tab_opname",      "📋 Stok Opname",         "_render_tab_stok_opname"),
         ]
         if role == "admin":
             ALL_TAB_DEFS.append(("tab_menu_control", "🛡️ Menu Control",    "__menu_control__"))

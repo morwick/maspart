@@ -549,37 +549,50 @@ def _perms_load_from_supabase(perm_type: str) -> dict:
 
 def _perms_save_to_supabase(perm_type: str, username: str, keys: list) -> bool:
     """Upsert satu baris (perm_type, username) ke Supabase.
-    Strategi: PATCH dulu (update jika sudah ada), kalau 0 rows affected baru POST (insert baru).
+
+    Strategi: SELECT dulu untuk tahu existing/baru → branch UPDATE atau INSERT.
+    Tidak mengandalkan Content-Range karena PostgREST balas '*/*' saat 0 rows
+    match (ambigu dengan rows-updated).
     """
     payload = {
         "keys":       keys,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    params = {
-        "perm_type": f"eq.{perm_type}",
-        "username":  f"eq.{username}",
-    }
     try:
-        # 1) Coba UPDATE dulu
-        resp = requests.patch(
+        # 1) Cek existing row
+        r0 = requests.get(
             _rest_url(_PERMS_TABLE),
-            headers=_headers("return=minimal"),
-            params=params,
-            json=payload,
+            headers={**_headers(), "Accept": "application/json"},
+            params={
+                "select":    "id",
+                "perm_type": f"eq.{perm_type}",
+                "username":  f"eq.{username}",
+                "limit":     "1",
+            },
             timeout=_PERMS_TIMEOUT,
         )
-        if resp.status_code in (200, 204):
-            # Cek apakah ada row yang ter-update (header Content-Range atau body kosong = sukses)
-            content_range = resp.headers.get("Content-Range", "")
-            # Content-Range: 0-0/* artinya 1 row, */0 artinya 0 rows
-            rows_updated = True  # default anggap sukses kecuali bisa deteksi 0 rows
-            if "*/0" in content_range or content_range == "":
-                rows_updated = False
+        r0.raise_for_status()
+        existing = r0.json()
 
-            if rows_updated:
+        if existing:
+            # 2a) UPDATE
+            resp = requests.patch(
+                _rest_url(_PERMS_TABLE),
+                headers=_headers("return=minimal"),
+                params={
+                    "perm_type": f"eq.{perm_type}",
+                    "username":  f"eq.{username}",
+                },
+                json=payload,
+                timeout=_PERMS_TIMEOUT,
+            )
+            if resp.status_code in (200, 204):
                 return True
+            print(f"[supabase] ❌ perms PATCH '{perm_type}/{username}': "
+                  f"{resp.status_code} {resp.text[:200]}")
+            return False
 
-        # 2) Kalau UPDATE tidak kena row (belum ada), lakukan INSERT
+        # 2b) INSERT
         insert_payload = {
             "perm_type":  perm_type,
             "username":   username,
@@ -593,8 +606,8 @@ def _perms_save_to_supabase(perm_type: str, username: str, keys: list) -> bool:
         )
         if resp2.status_code in (200, 201, 204):
             return True
-
-        print(f"[supabase] ❌ perms save '{perm_type}/{username}': {resp2.status_code} {resp2.text[:200]}")
+        print(f"[supabase] ❌ perms INSERT '{perm_type}/{username}': "
+              f"{resp2.status_code} {resp2.text[:200]}")
         return False
 
     except Exception as e:
@@ -719,6 +732,260 @@ class SupabasePermissions:
     def invalidate(perm_type: str):
         """Reset cache untuk perm_type tertentu."""
         _perms_invalidate(perm_type)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STOK OPNAME — Sessions per User
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tabel: opname_sessions  (lihat migrations/002_opname.sql)
+#   id, session_id (uuid unique), username, is_draft, payload (jsonb),
+#   started_at, updated_at, finalized_at
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_OPNAME_TABLE   = "opname_sessions"
+_OPNAME_TIMEOUT = 15
+
+SUPABASE_OPNAME_ENABLED = _is_configured()
+
+
+def _opname_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class SupabaseOpname:
+    """
+    REST CRUD untuk sesi stok opname.
+    Setiap sesi disimpan utuh sebagai 1 row dengan payload JSONB.
+
+    Public API mengikuti modul stok_opname (drop-in replacement):
+      load_draft / save_draft / delete_draft
+      load_history / finalize / delete_history_entry
+    """
+
+    @staticmethod
+    def is_available() -> bool:
+        return SUPABASE_OPNAME_ENABLED and _is_configured()
+
+    # ── Draft ─────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def load_draft(username: str) -> Optional[dict]:
+        try:
+            resp = requests.get(
+                _rest_url(_OPNAME_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select":   "payload",
+                    "username": f"eq.{username}",
+                    "is_draft": "eq.true",
+                    "limit":    "1",
+                },
+                timeout=_OPNAME_TIMEOUT,
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            if not rows:
+                return None
+            return rows[0].get("payload")
+        except Exception as e:
+            print(f"[supabase] ❌ opname load_draft '{username}': {e}")
+            return None
+
+    @staticmethod
+    def save_draft(username: str, session: dict) -> tuple[bool, Optional[str]]:
+        """Upsert draft. SELECT dulu untuk tahu existing/tidak → branch UPDATE/INSERT."""
+        sid = session.get("session_id", "")
+        if not sid:
+            return False, "session_id kosong"
+        session["updated_at"] = _opname_now_iso()
+        try:
+            # 1) Cek apakah draft existing untuk user ini
+            r0 = requests.get(
+                _rest_url(_OPNAME_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select":   "id",
+                    "username": f"eq.{username}",
+                    "is_draft": "eq.true",
+                    "limit":    "1",
+                },
+                timeout=_OPNAME_TIMEOUT,
+            )
+            r0.raise_for_status()
+            existing = r0.json()
+
+            if existing:
+                # 2a) UPDATE existing draft
+                resp = requests.patch(
+                    _rest_url(_OPNAME_TABLE),
+                    headers=_headers("return=minimal"),
+                    params={
+                        "username": f"eq.{username}",
+                        "is_draft": "eq.true",
+                    },
+                    json={
+                        "session_id": sid,
+                        "payload":    session,
+                        "started_at": session.get("started_at"),
+                        "updated_at": session["updated_at"],
+                    },
+                    timeout=_OPNAME_TIMEOUT,
+                )
+                if resp.status_code in (200, 204):
+                    return True, None
+                return False, f"PATCH HTTP {resp.status_code}: {resp.text[:200]}"
+
+            # 2b) INSERT baru
+            insert_payload = {
+                "session_id":   sid,
+                "username":     username,
+                "is_draft":     True,
+                "payload":      session,
+                "started_at":   session.get("started_at"),
+                "updated_at":   session["updated_at"],
+                "finalized_at": None,
+            }
+            resp2 = requests.post(
+                _rest_url(_OPNAME_TABLE),
+                headers=_headers("return=minimal"),
+                json=insert_payload,
+                timeout=_OPNAME_TIMEOUT,
+            )
+            if resp2.status_code in (200, 201, 204):
+                return True, None
+            return False, f"INSERT HTTP {resp2.status_code}: {resp2.text[:200]}"
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def delete_draft(username: str) -> bool:
+        try:
+            resp = requests.delete(
+                _rest_url(_OPNAME_TABLE),
+                headers=_headers("return=minimal"),
+                params={
+                    "username": f"eq.{username}",
+                    "is_draft": "eq.true",
+                },
+                timeout=_OPNAME_TIMEOUT,
+            )
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ opname delete_draft '{username}': {e}")
+            return False
+
+    # ── History ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def load_history(username: str, limit: int = 200) -> list:
+        try:
+            resp = requests.get(
+                _rest_url(_OPNAME_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select":   "payload",
+                    "username": f"eq.{username}",
+                    "is_draft": "eq.false",
+                    "order":    "finalized_at.desc",
+                    "limit":    str(limit),
+                },
+                timeout=_OPNAME_TIMEOUT,
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return [r.get("payload") for r in rows if r.get("payload")]
+        except Exception as e:
+            print(f"[supabase] ❌ opname load_history '{username}': {e}")
+            return []
+
+    @staticmethod
+    def finalize(username: str, session: dict) -> tuple[bool, Optional[str]]:
+        """
+        Ubah draft milik user ini jadi history (is_draft=false, finalized_at=now).
+        SELECT dulu untuk tahu existing — kalau tidak ada, INSERT langsung sebagai history.
+        """
+        sid = session.get("session_id", "")
+        if not sid:
+            return False, "session_id kosong"
+        now = _opname_now_iso()
+        session["finalized"]    = True
+        session["finalized_at"] = now
+        try:
+            r0 = requests.get(
+                _rest_url(_OPNAME_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select":     "id",
+                    "username":   f"eq.{username}",
+                    "session_id": f"eq.{sid}",
+                    "is_draft":   "eq.true",
+                    "limit":      "1",
+                },
+                timeout=_OPNAME_TIMEOUT,
+            )
+            r0.raise_for_status()
+            existing = r0.json()
+
+            if existing:
+                resp = requests.patch(
+                    _rest_url(_OPNAME_TABLE),
+                    headers=_headers("return=minimal"),
+                    params={
+                        "username":   f"eq.{username}",
+                        "is_draft":   "eq.true",
+                        "session_id": f"eq.{sid}",
+                    },
+                    json={
+                        "is_draft":     False,
+                        "payload":      session,
+                        "finalized_at": now,
+                        "updated_at":   now,
+                    },
+                    timeout=_OPNAME_TIMEOUT,
+                )
+                if resp.status_code in (200, 204):
+                    return True, None
+                return False, f"PATCH HTTP {resp.status_code}: {resp.text[:200]}"
+
+            # Tidak ada draft — insert langsung sebagai history
+            insert_payload = {
+                "session_id":   sid,
+                "username":     username,
+                "is_draft":     False,
+                "payload":      session,
+                "started_at":   session.get("started_at"),
+                "updated_at":   now,
+                "finalized_at": now,
+            }
+            r2 = requests.post(
+                _rest_url(_OPNAME_TABLE),
+                headers=_headers("return=minimal"),
+                json=insert_payload,
+                timeout=_OPNAME_TIMEOUT,
+            )
+            if r2.status_code in (200, 201, 204):
+                return True, None
+            return False, f"INSERT HTTP {r2.status_code}: {r2.text[:200]}"
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def delete_history_entry(username: str, session_id: str) -> bool:
+        try:
+            resp = requests.delete(
+                _rest_url(_OPNAME_TABLE),
+                headers=_headers("return=minimal"),
+                params={
+                    "username":   f"eq.{username}",
+                    "session_id": f"eq.{session_id}",
+                    "is_draft":   "eq.false",
+                },
+                timeout=_OPNAME_TIMEOUT,
+            )
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ opname delete_history '{username}/{session_id}': {e}")
+            return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
