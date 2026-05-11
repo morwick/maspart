@@ -158,5 +158,21 @@
     "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1947484045257576449",
     "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1947484046566199297",
     "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1947484048474607617"
+  ],
+  "712W50301-0112": [
+    "http://simscloud.cnhtcerp.com:8082/part-file-photo/zk/10421171/1593f4086c41452eb99bfedb1963f398",
+    "http://simscloud.cnhtcerp.com:8082/part-file-photo/wp/10421171/f60f402f1602456dafe88a12fae25948",
+    "http://simscloud.cnhtcerp.com:8082/part-file-photo/zk/10421171/f60f402f1602456dafe88a12fae25948",
+    "http://simscloud.cnhtcerp.com:8082/part-file-photo/zk/10421171/28f58710929d4c90b1931cbe6e260eb5",
+    "http://simscloud.cnhtcerp.com:8082/part-file-photo/wp/10421171/1593f4086c41452eb99bfedb1963f398",
+    "http://simscloud.cnhtcerp.com:8082/part-file-photo/wp/10421171/28f58710929d4c90b1931cbe6e260eb5",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158746443063297",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158775840833537",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158801703780354",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158828647120898",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158856087126017",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158881918214145",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158906225074178",
+    "http://simscloud.cnhtcerp.com:8082/intlapi/intl.file/stdp/file/billFilesReview?fileUploadInfoId=1880158931885719553"
   ]
 }

@@ -809,6 +809,35 @@ def list_indexed_pns(query: str = "", limit: int = 200) -> list[dict]:
     return out[:limit]
 
 
+def get_all_indexed_pns() -> set[str]:
+    """
+    Ambil SET semua part_number yang sudah ter-index di Supabase.
+    Dipakai untuk "fast mode" bulk indexing — cek PN existing 1× di awal,
+    skip yang sudah ada tanpa harus fetch SIMS per PN.
+
+    Return set kosong kalau Supabase belum dikonfigurasi atau error.
+    """
+    if not _is_configured():
+        return set()
+    try:
+        resp = requests.get(
+            _rest_url(INDEX_TABLE),
+            headers={**_rest_headers(use_service=True), "Accept": "application/json"},
+            params={
+                "select": "part_number",
+                "limit":  "100000",   # cukup untuk ribuan PN
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return set()
+        rows = resp.json() or []
+        return {r["part_number"] for r in rows if r.get("part_number")}
+    except Exception as e:
+        print(f"[image_search] get_all_indexed_pns error: {e}")
+        return set()
+
+
 def delete_pn_from_index(pn: str) -> bool:
     """Hapus semua baris part_image_index untuk PN tertentu."""
     if not _is_configured() or not pn:

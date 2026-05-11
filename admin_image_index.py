@@ -30,6 +30,7 @@ from image_search import (
     list_indexed_pns,
     delete_pn_from_index,
     get_index_stats,
+    get_all_indexed_pns,
 )
 
 
@@ -198,6 +199,17 @@ def _render_bulk_mode():
     pn_list_unique = list(dict.fromkeys(pn_list))
     n_unique = len(pn_list_unique)
 
+    skip_existing = st.checkbox(
+        "⚡ **Fast mode** — skip PN yang sudah ter-index (tanpa fetch SIMS)",
+        value=True,
+        key="img_idx_bulk_skip",
+        help=(
+            "Cek tabel part_image_index sekali di awal, lalu skip PN yang sudah ada. "
+            "Jauh lebih cepat untuk bulk besar. Matikan kalau ingin re-check semua PN "
+            "untuk foto SIMS yang baru ditambahkan."
+        ),
+    )
+
     col_a, col_b = st.columns([2, 1])
     with col_a:
         st.caption(
@@ -222,14 +234,40 @@ def _render_bulk_mode():
     if do_bulk and pn_list_unique:
         progress_area = st.container()
         with progress_area:
-            progress_bar = st.progress(0.0, text="Memulai...")
-            status_text  = st.empty()
-            log_area     = st.empty()
+            prefilter_box = st.empty()
+            progress_bar  = st.progress(0.0, text="Memulai...")
+            status_text   = st.empty()
+            log_area      = st.empty()
+
+        t0 = time.time()
+
+        # ── Pre-filter: fast mode skip PN yang sudah ter-index ──
+        skipped_results: list[dict] = []
+        pns_to_process = pn_list_unique
+        if skip_existing:
+            with st.spinner("⚡ Cek PN yang sudah ter-index..."):
+                existing = get_all_indexed_pns()
+            pns_to_process = [pn for pn in pn_list_unique if pn not in existing]
+            skipped_pns    = [pn for pn in pn_list_unique if pn in existing]
+            skipped_results = [{
+                "ok":               True,
+                "pn":               pn,
+                "n_photos":         0,
+                "n_indexed":        0,
+                "n_skipped":        0,
+                "error":            "",
+                "skipped_existing": True,
+            } for pn in skipped_pns]
+            if skipped_pns:
+                prefilter_box.info(
+                    f"⚡ **{len(skipped_pns)}** PN sudah ter-index → di-skip langsung "
+                    f"(fast mode). Memproses **{len(pns_to_process)}** PN baru..."
+                )
 
         log_lines = []
 
         def _cb(i, total, pn, r):
-            pct = i / total
+            pct = i / total if total else 1.0
             progress_bar.progress(pct, text=f"{i}/{total} — {pn}")
             n_idx = r.get("n_indexed", 0)
             n_skp = r.get("n_skipped", 0)
@@ -254,16 +292,21 @@ def _render_bulk_mode():
             log_area.text("\n".join(log_lines[-20:]))
             status_text.caption(f"Memproses **{i}/{total}** — {pn}")
 
-        t0 = time.time()
-        results = index_bulk(pn_list_unique, indexed_by=indexed_by,
-                             progress_callback=_cb)
+        if pns_to_process:
+            new_results = index_bulk(pns_to_process, indexed_by=indexed_by,
+                                     progress_callback=_cb)
+        else:
+            new_results = []
+            progress_bar.progress(1.0, text="Tidak ada PN baru untuk diproses")
+
         elapsed = time.time() - t0
+        all_results = skipped_results + new_results
 
         progress_bar.progress(1.0, text=f"Selesai dalam {elapsed:.1f}s")
         status_text.empty()
 
         st.session_state[_SS_BULK_RESULTS] = {
-            "results": results,
+            "results": all_results,
             "elapsed": elapsed,
         }
         st.rerun()
@@ -274,17 +317,25 @@ def _render_bulk_summary(payload: dict):
     results = payload["results"]
     elapsed = payload["elapsed"]
 
-    n_total = len(results)
-    n_ok    = sum(1 for r in results if r.get("ok"))
-    n_empty = sum(1 for r in results if not r.get("ok") and r.get("n_photos", 0) == 0)
-    n_err   = n_total - n_ok - n_empty
+    n_total      = len(results)
+    n_fast_skip  = sum(1 for r in results if r.get("skipped_existing"))
+    n_ok         = sum(1 for r in results
+                       if r.get("ok") and not r.get("skipped_existing"))
+    n_empty      = sum(1 for r in results
+                       if not r.get("ok") and r.get("n_photos", 0) == 0)
+    n_err        = n_total - n_ok - n_empty - n_fast_skip
 
     total_photos = sum(r.get("n_indexed", 0) for r in results)
 
+    parts = []
+    if n_ok:        parts.append(f"{n_ok} sukses")
+    if n_fast_skip: parts.append(f"⚡ {n_fast_skip} skip (sudah ter-index)")
+    if n_empty:     parts.append(f"{n_empty} tanpa foto SIMS")
+    if n_err:       parts.append(f"{n_err} error")
+
     st.success(
-        f"✅ Selesai dalam **{elapsed:.1f}s** — "
-        f"{n_ok} sukses, {n_empty} tanpa foto SIMS, {n_err} error. "
-        f"Total **{total_photos}** foto ter-index."
+        f"✅ Selesai dalam **{elapsed:.1f}s** — " + ", ".join(parts) +
+        f". Total **{total_photos}** foto baru ter-index."
     )
 
     # Detail expandable
@@ -294,7 +345,9 @@ def _render_bulk_summary(payload: dict):
             n_indexed = r.get("n_indexed", 0)
             n_photos  = r.get("n_photos", 0)
             err       = r.get("error", "")
-            if r.get("ok"):
+            if r.get("skipped_existing"):
+                st.markdown(f"- ⚡ **{pn}** — sudah ter-index (fast mode skip)")
+            elif r.get("ok"):
                 st.markdown(f"- ✅ **{pn}** — {n_indexed}/{n_photos} foto")
             elif n_photos == 0:
                 st.markdown(f"- ⚪ **{pn}** — tidak ada foto SIMS")
