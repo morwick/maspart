@@ -31,6 +31,8 @@ from image_search import (
     delete_pn_from_index,
     get_index_stats,
     get_all_indexed_pns,
+    get_sims_cache_stats,
+    clear_sims_cache,
 )
 
 
@@ -80,6 +82,9 @@ def render_image_index_tab():
         last = last[:16].replace("T", " ")
     col3.metric("Index terakhir", last)
 
+    # ── Cache management (expander, default collapsed) ────────────────────
+    _render_cache_panel()
+
     st.markdown("---")
 
     # ── 2 mode: Single / Bulk ─────────────────────────────────────────────
@@ -97,6 +102,80 @@ def render_image_index_tab():
 
     with tab_list:
         _render_indexed_list()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  CACHE PANEL
+# ══════════════════════════════════════════════════════════════════════════
+
+def _render_cache_panel():
+    """Panel kelola cache foto SIMS — stats + tombol clear."""
+    cs = get_sims_cache_stats()
+
+    # Warna icon berdasarkan persentase usage
+    if cs["pct_used"] >= 90:
+        icon = "🔴"
+    elif cs["pct_used"] >= 70:
+        icon = "🟡"
+    else:
+        icon = "🟢"
+
+    label = (
+        f"{icon} Cache foto SIMS: **{cs['size_mb']:.1f} MB** / {cs['max_mb']} MB "
+        f"({cs['n_files']} file)"
+    )
+
+    with st.expander(label, expanded=False):
+        st.caption(
+            "Cache menyimpan foto SIMS yang sudah di-resize (WebP 512px) "
+            "untuk thumbnail di kartu hasil pencarian. "
+            "Sistem otomatis hapus file paling lama saat cache mencapai 500 MB."
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Jumlah file", f"{cs['n_files']:,}")
+        c2.metric("Ukuran total", f"{cs['size_mb']:.1f} MB")
+        c3.metric("File tertua", cs["oldest_at"] or "—")
+
+        st.progress(min(cs["pct_used"] / 100.0, 1.0),
+                    text=f"{cs['pct_used']:.1f}% dari kapasitas {cs['max_mb']} MB")
+
+        if cs["pct_used"] >= 90:
+            st.warning(
+                "⚠️ Cache hampir penuh — sistem akan mulai hapus file lama otomatis."
+            )
+
+        # Tombol clear (dengan confirm 2-step)
+        notif = st.session_state.pop("_cache_clear_notif", None)
+        if notif:
+            st.success(notif) if notif.startswith("✅") else st.error(notif)
+
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            confirm = st.checkbox(
+                "Saya yakin",
+                key="_cache_clear_confirm",
+                help="Centang untuk aktifkan tombol clear.",
+            )
+        with col_b:
+            if st.button(
+                "🗑️ Clear semua cache foto SIMS",
+                disabled=not confirm or cs["n_files"] == 0,
+                use_container_width=True,
+                key="btn_clear_sims_cache",
+            ):
+                res = clear_sims_cache()
+                if res["error"]:
+                    st.session_state["_cache_clear_notif"] = (
+                        f"❌ Error: {res['error']}"
+                    )
+                else:
+                    st.session_state["_cache_clear_notif"] = (
+                        f"✅ Cache dihapus — {res['n_deleted']} file, "
+                        f"{res['freed_mb']:.1f} MB dibebaskan."
+                    )
+                st.session_state.pop("_cache_clear_confirm", None)
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -86,6 +86,13 @@ EMBED_BATCH_SIZE  = 8                 # DINOv2 forward pass per batch
 SIMS_CACHE_DIR    = Path("images/sims_cache")
 DOWNLOAD_RETRIES  = 1                 # 1 retry → max 2 attempt per URL
 
+# Cache size management
+CACHE_MAX_MB        = 500    # cap total cache (LRU eviction kalau lewat)
+CACHE_TARGET_RATIO  = 0.90   # cleanup turunkan ke 90% cap
+CACHE_THUMB_MAX_PX  = 512    # resize max dimension saat save ke cache
+CACHE_THUMB_QUALITY = 85     # WebP quality
+_CACHE_CLEANUP_EVERY = 50    # cek cleanup tiap N write
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  CONFIG HELPERS (sama pattern dengan admin_foto_part.py)
@@ -268,13 +275,141 @@ def _read_cache(url: str) -> Optional[bytes]:
     return None
 
 
+_cache_write_counter = 0
+
+
+def _resize_for_cache(content: bytes) -> Optional[bytes]:
+    """
+    Resize image ke max CACHE_THUMB_MAX_PX × CACHE_THUMB_MAX_PX, encode WebP.
+    Hemat ruang ~30× tanpa kehilangan kualitas untuk thumbnail + embedding
+    (DINOv2 input cuma 224 px, jadi 512 px masih oversampling).
+    Return None kalau gagal — caller fallback ke bytes original.
+    """
+    if not _TORCH_AVAILABLE:   # PIL diimport via blok torch di atas
+        return None
+    try:
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+        img.thumbnail((CACHE_THUMB_MAX_PX, CACHE_THUMB_MAX_PX), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="WEBP", quality=CACHE_THUMB_QUALITY, method=4)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"[image_search] resize for cache fail: {e}")
+        return None
+
+
+def _maybe_cleanup_cache(force: bool = False) -> None:
+    """
+    Throttled LRU eviction. Dipanggil per write tapi cek tiap N call saja.
+    Saat cache > CACHE_MAX_MB, hapus file paling lama diakses sampai 90% cap.
+    """
+    global _cache_write_counter
+    _cache_write_counter += 1
+    if not force and (_cache_write_counter % _CACHE_CLEANUP_EVERY) != 0:
+        return
+    try:
+        if not SIMS_CACHE_DIR.exists():
+            return
+        files: list = []
+        total = 0
+        for p in SIMS_CACHE_DIR.glob("*.bin"):
+            try:
+                st = p.stat()
+                files.append((p, st.st_size, st.st_atime))
+                total += st.st_size
+            except Exception:
+                pass
+        total_mb = total / (1024 * 1024)
+        if total_mb <= CACHE_MAX_MB:
+            return
+        target_mb = CACHE_MAX_MB * CACHE_TARGET_RATIO
+        files.sort(key=lambda x: x[2])   # oldest atime dulu
+        deleted = 0
+        for p, sz, _ in files:
+            if total_mb <= target_mb:
+                break
+            try:
+                p.unlink()
+                total_mb -= sz / (1024 * 1024)
+                deleted += 1
+            except Exception:
+                pass
+        if deleted:
+            print(f"[image_search] cache cleanup: deleted {deleted} files, "
+                  f"now {total_mb:.1f} MB")
+    except Exception as e:
+        print(f"[image_search] cleanup error: {e}")
+
+
 def _write_cache(url: str, content: bytes) -> None:
-    """Simpan foto ke disk cache."""
+    """
+    Simpan foto ke disk cache — resize dulu untuk hemat ruang, lalu
+    trigger LRU eviction throttled kalau cache mendekati cap.
+    """
     try:
         SIMS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _cache_path_for_url(url).write_bytes(content)
+        small = _resize_for_cache(content)
+        # Pakai versi resize HANYA kalau lebih kecil (untuk file kecil
+        # original kadang lebih efisien daripada hasil encode WebP)
+        payload = small if (small and len(small) < len(content)) else content
+        _cache_path_for_url(url).write_bytes(payload)
+        _maybe_cleanup_cache()
     except Exception as e:
         print(f"[image_search] cache write fail: {e}")
+
+
+def get_sims_cache_stats() -> dict:
+    """
+    Statistik cache foto SIMS untuk admin UI.
+    Return: {n_files, size_mb, oldest_at, max_mb, pct_used}
+    """
+    out = {
+        "n_files":   0,
+        "size_mb":   0.0,
+        "oldest_at": None,
+        "max_mb":    CACHE_MAX_MB,
+        "pct_used":  0.0,
+    }
+    if not SIMS_CACHE_DIR.exists():
+        return out
+    oldest_atime = None
+    total = 0
+    for p in SIMS_CACHE_DIR.glob("*.bin"):
+        try:
+            st = p.stat()
+            out["n_files"] += 1
+            total += st.st_size
+            if oldest_atime is None or st.st_atime < oldest_atime:
+                oldest_atime = st.st_atime
+        except Exception:
+            pass
+    out["size_mb"]  = total / (1024 * 1024)
+    out["pct_used"] = (out["size_mb"] / CACHE_MAX_MB) * 100.0
+    if oldest_atime:
+        from datetime import datetime
+        out["oldest_at"] = datetime.fromtimestamp(oldest_atime).strftime("%Y-%m-%d %H:%M")
+    return out
+
+
+def clear_sims_cache() -> dict:
+    """Hapus semua file di sims_cache. Return: {n_deleted, freed_mb, error}"""
+    result = {"n_deleted": 0, "freed_mb": 0.0, "error": ""}
+    if not SIMS_CACHE_DIR.exists():
+        return result
+    total = 0
+    try:
+        for p in SIMS_CACHE_DIR.glob("*.bin"):
+            try:
+                sz = p.stat().st_size
+                p.unlink()
+                result["n_deleted"] += 1
+                total += sz
+            except Exception:
+                pass
+        result["freed_mb"] = total / (1024 * 1024)
+    except Exception as e:
+        result["error"] = str(e)
+    return result
 
 
 def _download_image(url: str, use_cache: bool = True) -> Optional[bytes]:
@@ -1089,14 +1224,18 @@ def render_search_image_tab():
                         _render_result_card(len(results) + idx + 1, fallback[idx])
 
 
+_CARD_IMG_MAX_PX = 150   # tinggi foto dalam card hasil
+
+
 def _render_result_card(rank: int, r: dict):
-    """Render 1 kartu hasil pencarian."""
+    """Render 1 kartu hasil pencarian (kompak — foto + header + button)."""
+    import base64
+
     pn         = r["part_number"]
     sim_pct    = r["similarity"] * 100.0
     sims_url   = r["sims_url"]
     part_name  = _try_get_part_name(pn) or "—"
 
-    # Border + bg color berdasarkan similarity
     if sim_pct >= 90:
         badge_color = "#16a34a"   # hijau
     elif sim_pct >= 80:
@@ -1106,33 +1245,58 @@ def _render_result_card(rank: int, r: dict):
     else:
         badge_color = "#6b7280"   # abu
 
+    # Ambil foto + encode base64 → inline ke HTML card biar height fixable
+    img_html = (
+        '<div style="color:#9ca3af; font-size:11px; padding:20px 0;">'
+        '⚠️ Foto gagal dimuat</div>'
+    )
+    if sims_url:
+        img_bytes = _download_image(sims_url)
+        if img_bytes:
+            b64  = base64.b64encode(img_bytes).decode()
+            # detect mime sederhana via magic bytes
+            if img_bytes[:4] == b"RIFF":
+                mime = "image/webp"
+            elif img_bytes[:3] == b"\xff\xd8\xff":
+                mime = "image/jpeg"
+            elif img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            else:
+                mime = "image/jpeg"
+            img_html = (
+                f'<img src="data:{mime};base64,{b64}" '
+                f'style="max-height:{_CARD_IMG_MAX_PX}px; max-width:100%; '
+                f'object-fit:contain;"/>'
+            )
+
     st.markdown(
         f"""
-        <div style="border:1px solid #e5e7eb; border-radius:10px;
-                    padding:10px; margin-bottom:8px; background:#fafafa;">
+        <div style="border:1px solid #e5e7eb; border-radius:8px; padding:8px;
+                    margin-bottom:4px; background:#fafafa;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div style="font-weight:600; font-size:15px;">#{rank} &nbsp; {pn}</div>
-            <div style="background:{badge_color}; color:white; padding:2px 10px;
-                        border-radius:12px; font-weight:600; font-size:13px;">
+            <div style="font-weight:600; font-size:13px;">#{rank}&nbsp;{pn}</div>
+            <div style="background:{badge_color}; color:white; padding:1px 8px;
+                        border-radius:10px; font-weight:600; font-size:11px;">
               {sim_pct:.1f}%
             </div>
           </div>
-          <div style="color:#374151; font-size:13px; margin-top:4px;">{part_name}</div>
+          <div style="color:#374151; font-size:11px; margin:2px 0 6px 0;
+                      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+               title="{part_name}">
+            {part_name}
+          </div>
+          <div style="text-align:center; height:{_CARD_IMG_MAX_PX}px; display:flex;
+                      align-items:center; justify-content:center;
+                      background:#fff; border-radius:6px;">
+            {img_html}
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Tampilkan foto SIMS (pakai _download_image agar header SIMS otomatis)
-    if sims_url:
-        img_bytes = _download_image(sims_url)
-        if img_bytes:
-            st.image(img_bytes, use_container_width=True)
-        else:
-            st.caption("⚠️ Foto gagal dimuat")
-
-    # Tombol "Cari detail PN ini" → trigger search PN di tab utama
-    if st.button(f"🔎 Cari Detail {pn}", key=f"img_res_detail_{rank}_{pn}",
+    # Tombol detail kompak
+    if st.button(f"🔎 Detail {pn}", key=f"img_res_detail_{rank}_{pn}",
                  use_container_width=True):
         st.session_state["_trigger_search_pn"] = pn
         st.rerun()
