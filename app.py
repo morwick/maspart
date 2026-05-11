@@ -50,6 +50,19 @@ except ImportError:
     def get_supabase_photo_urls(pn: str) -> list:
         return []
 
+# ── Image Search (Cari by Foto) ──────────────────────────────────────
+try:
+    from image_search import render_search_image_tab
+    from admin_image_index import render_image_index_tab
+    IMAGE_SEARCH_ENABLED = True
+except ImportError as _ise:
+    IMAGE_SEARCH_ENABLED = False
+    _IMAGE_SEARCH_ERR = str(_ise)
+    def render_search_image_tab():
+        st.warning(f"⚠️ Fitur Cari by Foto tidak tersedia: {_IMAGE_SEARCH_ERR}")
+    def render_image_index_tab():
+        st.warning(f"⚠️ Tab Image Index tidak tersedia: {_IMAGE_SEARCH_ERR}")
+
 # ── Admin Data Uploader (Harga + Populasi) ───────────────────────────
 try:
     from admin_data_uploader import render_data_uploader_tab
@@ -74,13 +87,14 @@ warnings.filterwarnings('ignore')
 
 # Semua tab yang tersedia
 ALL_MENU_TABS: dict = {
-    "tab_search_pn":   "🔢 Search Part Number",
-    "tab_search_name": "📝 Search Part Name",
-    "tab_compare":     "🔍 Bandingkan 2 Part",
-    "tab_batch":       "📥 Batch Download",
-    "tab_populasi":    "🚛 Populasi Unit",
-    "tab_harga":       "💰 Harga",
-    "tab_opname":      "📋 Stok Opname",
+    "tab_search_pn":    "🔢 Search Part Number",
+    "tab_search_name":  "📝 Search Part Name",
+    "tab_search_image": "🖼️ Cari by Foto",
+    "tab_compare":      "🔍 Bandingkan 2 Part",
+    "tab_batch":        "📥 Batch Download",
+    "tab_populasi":     "🚛 Populasi Unit",
+    "tab_harga":        "💰 Harga",
+    "tab_opname":       "📋 Stok Opname",
 }
 
 # Tab yang SELALU aktif (tidak bisa dinonaktifkan admin)
@@ -443,7 +457,7 @@ def get_allowed_tabs(username: str, role: str) -> list:
     """Admin selalu dapat semua tab. User lain sesuai konfigurasi."""
     if role == "admin":
         return list(ALL_MENU_TABS.keys()) + [
-            "tab_menu_control", "tab_data_upload", "tab_foto_part"
+            "tab_menu_control", "tab_data_upload", "tab_foto_part", "tab_image_index"
         ]
     return MenuAccessManager.get_user_tabs(username)
 
@@ -3295,6 +3309,21 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
 
                 """)
 
+        # ── Trigger search dari Image Search ─────────────────────────
+        # Image Search tab set _trigger_search_pn → kita jalankan
+        # search_part_number di sini supaya hasilnya tampil di bawah tabs.
+        _trigger_pn = st.session_state.pop("_trigger_search_pn", None)
+        if _trigger_pn:
+            try:
+                st.session_state.search_results = search_part_number(
+                    _trigger_pn, st.session_state.excel_files,
+                    self.stok_cache, self.harga_lookup
+                )
+                st.session_state.search_type = "Part Number"
+                st.session_state.search_term = _trigger_pn
+            except Exception as _e:
+                st.warning(f"⚠️ Gagal menjalankan search dari image: {_e}")
+
         # ── TABS ────────────────────────────────────────────────────
         st.markdown(TAB_PERSIST_JS, unsafe_allow_html=True)
         st.markdown('<div class="search-box">', unsafe_allow_html=True)
@@ -3302,18 +3331,20 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
 
         # Definisi semua tab dan method render-nya
         ALL_TAB_DEFS = [
-            ("tab_search_pn",   "🔢 Search Part Number", "_render_tab_search_pn"),
-            ("tab_search_name", "📝 Search Part Name",    "_render_tab_search_name"),
-            ("tab_compare",     "🔍 Bandingkan 2 Part",   "_render_tab_compare_parts"),
-            ("tab_batch",       "📥 Batch Download",      "render_batch_download_tab"),
-            ("tab_populasi",    "🚛 Populasi Unit",       "render_populasi_tab"),
-            ("tab_harga",       "💰 Harga",               "render_harga_tab"),
-            ("tab_opname",      "📋 Stok Opname",         "_render_tab_stok_opname"),
+            ("tab_search_pn",    "🔢 Search Part Number", "_render_tab_search_pn"),
+            ("tab_search_name",  "📝 Search Part Name",    "_render_tab_search_name"),
+            ("tab_search_image", "🖼️ Cari by Foto",        "__search_image__"),
+            ("tab_compare",      "🔍 Bandingkan 2 Part",   "_render_tab_compare_parts"),
+            ("tab_batch",        "📥 Batch Download",      "render_batch_download_tab"),
+            ("tab_populasi",     "🚛 Populasi Unit",       "render_populasi_tab"),
+            ("tab_harga",        "💰 Harga",               "render_harga_tab"),
+            ("tab_opname",       "📋 Stok Opname",         "_render_tab_stok_opname"),
         ]
         if role == "admin":
             ALL_TAB_DEFS.append(("tab_menu_control", "🛡️ Menu Control",    "__menu_control__"))
             ALL_TAB_DEFS.append(("tab_data_upload",  "📊 Upload Data",     "__data_upload__"))
             ALL_TAB_DEFS.append(("tab_foto_part",    "📷 Upload Foto Part", "__foto_part__"))
+            ALL_TAB_DEFS.append(("tab_image_index",  "🧠 Image Index",     "__image_index__"))
             if SUPABASE_ENABLED and render_user_management_tab is not None:
                 ALL_TAB_DEFS.append(("tab_user_mgmt", "👥 User Management", "__user_mgmt__"))
 
@@ -3331,6 +3362,10 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                     render_data_uploader_tab()
                 elif fn == "__foto_part__":
                     render_foto_part_tab()
+                elif fn == "__search_image__":
+                    render_search_image_tab()
+                elif fn == "__image_index__":
+                    render_image_index_tab()
                 elif fn == "__user_mgmt__":
                     render_user_management_tab()
                 else:
