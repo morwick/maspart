@@ -663,6 +663,96 @@ def search_by_image(image_bytes: bytes,
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  SMART FILTER — adaptive cutoff tanpa threshold manual
+# ══════════════════════════════════════════════════════════════════════════
+
+# Konstanta filter — dipilih berdasarkan karakter DINOv2 untuk sparepart:
+# noise floor 55% (di bawah itu = bentuk silinder/balok generik),
+# cliff 8% (gap antar hasil yang nyata = beda kategori part),
+# relative drop 15% (lebih dari ini dari top = different family).
+_SMART_ABS_FLOOR = 0.55
+_SMART_REL_DROP  = 0.15
+_SMART_CLIFF     = 0.08
+_SMART_HIGH_CONF = 0.80
+
+
+def smart_filter_results(results: list[dict]) -> dict:
+    """
+    Filter hasil pencarian otomatis tanpa threshold manual.
+
+    Mekanisme (semua kondisi dicek per item; cut-off saat salah satu kena):
+      1. Absolute floor: skip item < 55% (DINOv2 noise zone)
+      2. Relative drop: skip item > 15% lebih rendah dari top hit
+      3. Cliff: skip kalau ada gap > 8% dari item sebelumnya,
+         KECUALI item masih di zona high-confidence (≥80%) — di zona ini
+         semua hasil di-keep karena gap kecil tetap match valid.
+      4. Kalau top hit < 55% → return kosong (tidak ada match meyakinkan)
+
+    Return:
+      {
+        "kept":    list[dict],   # hasil yang lolos filter
+        "dropped": list[dict],   # sisanya (jadi fallback kandidat)
+        "reason":  str,          # alasan cut-off untuk caption UI
+        "mode":    str,          # "strong" | "moderate" | "weak" | "none"
+        "top_sim": float,        # similarity item teratas (0.0 kalau kosong)
+      }
+    """
+    if not results:
+        return {"kept": [], "dropped": [], "reason": "tidak ada hasil",
+                "mode": "none", "top_sim": 0.0}
+
+    sorted_r = sorted(results, key=lambda x: x.get("similarity", 0.0), reverse=True)
+    top_sim  = sorted_r[0]["similarity"]
+
+    # Top hit terlalu lemah → tidak ada match yang meyakinkan
+    if top_sim < _SMART_ABS_FLOOR:
+        return {
+            "kept":    [],
+            "dropped": sorted_r,
+            "reason":  f"similarity tertinggi hanya {top_sim*100:.1f}% — tidak ada match meyakinkan",
+            "mode":    "none",
+            "top_sim": top_sim,
+        }
+
+    kept:    list[dict] = [sorted_r[0]]
+    dropped: list[dict] = []
+    reason  = "semua hasil lolos filter"
+
+    for i, r in enumerate(sorted_r[1:], start=1):
+        sim      = r["similarity"]
+        prev_sim = kept[-1]["similarity"]
+
+        if sim < _SMART_ABS_FLOOR:
+            reason  = f"sisa hasil di bawah noise floor ({_SMART_ABS_FLOOR*100:.0f}%)"
+            dropped = sorted_r[i:]
+            break
+        if (top_sim - sim) > _SMART_REL_DROP:
+            reason  = f"selisih > {_SMART_REL_DROP*100:.0f}% dari top — bukan family yang sama"
+            dropped = sorted_r[i:]
+            break
+        if (prev_sim - sim) > _SMART_CLIFF and sim < _SMART_HIGH_CONF:
+            reason  = f"jurang similarity terdeteksi ({prev_sim*100:.1f}% → {sim*100:.1f}%)"
+            dropped = sorted_r[i:]
+            break
+        kept.append(r)
+
+    if top_sim >= 0.85:
+        mode = "strong"
+    elif top_sim >= 0.70:
+        mode = "moderate"
+    else:
+        mode = "weak"
+
+    return {
+        "kept":    kept,
+        "dropped": dropped,
+        "reason":  reason,
+        "mode":    mode,
+        "top_sim": top_sim,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  ADMIN OPERATIONS — list / delete / stats
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -771,7 +861,6 @@ def get_index_stats() -> dict:
 _SS_QUERY_BYTES   = "_img_search_query_bytes"
 _SS_QUERY_NAME    = "_img_search_query_name"
 _SS_RESULTS       = "_img_search_results"
-_SS_LAST_THRESHOLD = "_img_search_last_threshold"
 
 
 def _try_get_part_name(pn: str) -> str:
@@ -842,21 +931,15 @@ def render_search_image_tab():
             st.session_state[_SS_QUERY_NAME]  = uploaded.name
 
         top_k = st.slider(
-            "Jumlah hasil teratas:",
+            "Jumlah kandidat dipertimbangkan:",
             min_value=5, max_value=30,
             value=DEFAULT_TOP_K, step=1,
             key="img_search_topk",
+            help="Smart filter akan menyaring otomatis dari kandidat ini.",
         )
-        threshold = st.slider(
-            "Threshold similarity minimum (%):",
-            min_value=0, max_value=95,
-            value=int(DEFAULT_THRESHOLD * 100), step=5,
-            key="img_search_threshold",
-            help=(
-                "Filter hasil: hanya tampilkan yang ≥ nilai ini. "
-                "0% = tampilkan apa adanya. "
-                "Untuk DINOv2, similarity 60-80% biasanya sudah cukup mirip."
-            ),
+        st.caption(
+            "🤖 **Smart filter aktif** — hasil tidak relevan disaring otomatis "
+            "berdasarkan distribusi similarity (deteksi noise & jurang score)."
         )
 
         col_b1, col_b2 = st.columns([3, 1])
@@ -885,27 +968,23 @@ def render_search_image_tab():
     # ── Eksekusi search ──
     if do_search and q_bytes:
         with st.spinner("🔍 Menghitung embedding & mencari di database..."):
-            t0      = time.time()
-            results = search_by_image(
+            t0 = time.time()
+            # Ambil kandidat mentah tanpa threshold — biar smart filter
+            # punya distribusi lengkap untuk deteksi cliff/noise.
+            raw = search_by_image(
                 q_bytes,
                 top_k=int(top_k),
-                threshold=threshold / 100.0,
+                threshold=0.0,
             )
-            # Kalau kosong, retry tanpa threshold supaya user lihat
-            # similarity actual (kandidat terdekat).
-            fallback = []
-            if not results:
-                fallback = search_by_image(
-                    q_bytes,
-                    top_k=5,
-                    threshold=0.0,
-                )
-            elapsed = time.time() - t0
+            filtered = smart_filter_results(raw)
+            elapsed  = time.time() - t0
 
-        st.session_state[_SS_RESULTS]        = results
-        st.session_state["_img_search_fallback"] = fallback
-        st.session_state[_SS_LAST_THRESHOLD] = threshold
-        st.session_state["_img_search_elapsed"] = elapsed
+        st.session_state[_SS_RESULTS]            = filtered["kept"]
+        st.session_state["_img_search_fallback"] = filtered["dropped"][:5]
+        st.session_state["_img_search_filter_reason"] = filtered["reason"]
+        st.session_state["_img_search_filter_mode"]   = filtered["mode"]
+        st.session_state["_img_search_top_sim"]       = filtered["top_sim"]
+        st.session_state["_img_search_elapsed"]       = elapsed
         st.rerun()
 
     # ── Tampilkan hasil ──
@@ -913,29 +992,39 @@ def render_search_image_tab():
     if results is None:
         return
 
-    elapsed = st.session_state.get("_img_search_elapsed", 0.0)
+    elapsed       = st.session_state.get("_img_search_elapsed", 0.0)
+    filter_mode   = st.session_state.get("_img_search_filter_mode", "none")
+    filter_reason = st.session_state.get("_img_search_filter_reason", "")
+    top_sim       = st.session_state.get("_img_search_top_sim", 0.0)
+    fallback      = st.session_state.get("_img_search_fallback", [])
+
     st.markdown("---")
     st.markdown(f"### 📋 Hasil Pencarian ({len(results)} ditemukan, {elapsed:.2f}s)")
 
+    # Badge confidence dari smart filter
+    if filter_mode == "strong":
+        st.success(f"✅ **Match kuat** — top similarity {top_sim*100:.1f}%. Filter: {filter_reason}.")
+    elif filter_mode == "moderate":
+        st.info(f"ℹ️ **Match sedang** — top similarity {top_sim*100:.1f}%. Filter: {filter_reason}.")
+    elif filter_mode == "weak":
+        st.warning(f"⚠️ **Match lemah** — top similarity hanya {top_sim*100:.1f}%. Filter: {filter_reason}.")
+
     if not results:
-        used_th = st.session_state.get(_SS_LAST_THRESHOLD, DEFAULT_THRESHOLD * 100)
-        fallback = st.session_state.get("_img_search_fallback", [])
         if fallback:
             best_sim = fallback[0]["similarity"] * 100
             st.warning(
-                f"⚠️ Tidak ada hasil dengan similarity ≥ **{used_th:.0f}%**. "
-                f"Kandidat terdekat hanya **{best_sim:.1f}%**. "
-                f"Turunkan threshold di slider, atau pakai foto yang lebih jelas / mirip foto SIMS."
+                f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%** — "
+                f"kemungkinan part belum di-index, atau foto query terlalu beda dari foto SIMS."
             )
-            st.markdown("#### 🔍 Kandidat terdekat (di bawah threshold)")
-            for i in range(0, len(fallback), 2):
-                cols = st.columns(2)
-                for j, col in enumerate(cols):
-                    idx = i + j
-                    if idx >= len(fallback):
-                        continue
-                    with col:
-                        _render_result_card(idx + 1, fallback[idx])
+            with st.expander(f"🔍 Lihat {len(fallback)} kandidat terdekat (low confidence)", expanded=False):
+                for i in range(0, len(fallback), 2):
+                    cols = st.columns(2)
+                    for j, col in enumerate(cols):
+                        idx = i + j
+                        if idx >= len(fallback):
+                            continue
+                        with col:
+                            _render_result_card(idx + 1, fallback[idx])
         else:
             st.warning(
                 "⚠️ Tidak ada hasil sama sekali. "
@@ -943,7 +1032,7 @@ def render_search_image_tab():
             )
         return
 
-    # Grid 2 kolom
+    # Grid 2 kolom untuk hasil lolos filter
     for i in range(0, len(results), 2):
         cols = st.columns(2)
         for j, col in enumerate(cols):
@@ -953,6 +1042,22 @@ def render_search_image_tab():
             r = results[idx]
             with col:
                 _render_result_card(idx + 1, r)
+
+    # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
+    if fallback:
+        with st.expander(
+            f"👁️ Lihat {len(fallback)} kandidat yang disaring smart filter",
+            expanded=False,
+        ):
+            st.caption(f"Disaring karena: {filter_reason}")
+            for i in range(0, len(fallback), 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    idx = i + j
+                    if idx >= len(fallback):
+                        continue
+                    with col:
+                        _render_result_card(len(results) + idx + 1, fallback[idx])
 
 
 def _render_result_card(rank: int, r: dict):
