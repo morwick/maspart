@@ -1447,43 +1447,15 @@ def render_search_image_tab():
                         _render_result_card(idx + ambig_count + 1,
                                             rest_results[idx])
     else:
-        # ── Normal mode: BEST MATCH highlight + Kandidat lain ─────────────
-        st.markdown(
-            """
-            <div style="margin:14px 0 6px 0; display:flex; align-items:center; gap:6px;">
-              <div style="background:linear-gradient(90deg,#fbbf24,#f59e0b);
-                          color:white; padding:3px 10px; border-radius:12px;
-                          font-size:11px; font-weight:700; letter-spacing:0.5px;">
-                🏆 BEST MATCH
-              </div>
-              <div style="color:#6b7280; font-size:11px;">
-                Hasil dengan similarity tertinggi
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        _render_result_card(1, results[0], is_best=True)
-
-        other_results = results[1:]
-        if other_results:
-            st.markdown(
-                """
-                <div style="margin:14px 0 6px 0; color:#374151; font-size:13px;
-                            font-weight:600;">
-                  🔎 Kandidat lain
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            for i in range(0, len(other_results), 2):
-                cols = st.columns(2)
-                for j, col in enumerate(cols):
-                    idx = i + j
-                    if idx >= len(other_results):
-                        continue
-                    with col:
-                        _render_result_card(idx + 2, other_results[idx])
+        # ── Normal mode: render semua hasil dalam grid 2 kolom ────────────
+        for i in range(0, len(results), 2):
+            cols = st.columns(2)
+            for j, col in enumerate(cols):
+                idx = i + j
+                if idx >= len(results):
+                    continue
+                with col:
+                    _render_result_card(idx + 1, results[idx])
 
     # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
     if fallback:
@@ -1574,15 +1546,15 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
         card_border = "1px solid #e5e7eb;"
         card_bg     = "#fafafa"
 
-    # Ambil foto + encode base64 → inline ke HTML card biar height fixable
-    img_html = (
-        '<div style="color:#9ca3af; font-size:11px; padding:20px 0;">'
-        '⚠️ Foto gagal dimuat</div>'
-    )
+    # Ambil foto + encode base64 — pakai background-image (lebih reliable
+    # upscale dibanding object-fit:contain di Streamlit context)
+    img_bg_style    = ""
+    img_inner_html  = ""
+    has_img         = False
     if sims_url:
         img_bytes = _download_image(sims_url)
         if img_bytes:
-            b64  = base64.b64encode(img_bytes).decode()
+            b64 = base64.b64encode(img_bytes).decode()
             if img_bytes[:4] == b"RIFF":
                 mime = "image/webp"
             elif img_bytes[:3] == b"\xff\xd8\xff":
@@ -1591,10 +1563,21 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
                 mime = "image/png"
             else:
                 mime = "image/jpeg"
-            img_html = (
-                f'<img src="data:{mime};base64,{b64}" '
-                f'style="max-height:{img_h}px; max-width:100%; object-fit:contain;"/>'
+            img_bg_style = (
+                f"background-image:url(data:{mime};base64,{b64});"
+                "background-size:contain;"
+                "background-position:center;"
+                "background-repeat:no-repeat;"
             )
+            has_img = True
+
+    if not has_img:
+        img_inner_html = (
+            '<div style="color:#9ca3af; font-size:11px;">⚠️ Foto gagal dimuat</div>'
+        )
+        flex_center = "display:flex; align-items:center; justify-content:center;"
+    else:
+        flex_center = ""
 
     st.markdown(
         f"""
@@ -1617,11 +1600,10 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
                title="{part_name}">
             {part_name}
           </div>
-          <div style="text-align:center; height:{img_h}px; display:flex;
-                      align-items:center; justify-content:center;
-                      background:#fff; border-radius:8px;
-                      border:1px solid #f3f4f6;">
-            {img_html}
+          <div style="height:{img_h}px; background:#fff; border-radius:8px;
+                      border:1px solid #f3f4f6; overflow:hidden;
+                      {img_bg_style} {flex_center}">
+            {img_inner_html}
           </div>
         </div>
         """,
