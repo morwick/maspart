@@ -741,19 +741,44 @@ def index_bulk(pn_list: list[str], indexed_by: str = "admin",
 #  SEARCH
 # ══════════════════════════════════════════════════════════════════════════
 
+# Konstanta untuk aggregate scoring
+_AGG_FETCH_MULT      = 5      # fetch top_k × 5 foto mentah dari DB
+_AGG_FETCH_MIN       = 30     # minimum kandidat foto
+_AGG_STRONG_TH       = 0.70   # foto dianggap "strong match" kalau ≥ 70%
+_AGG_BOOST_PER_MATCH = 0.04   # +4% confidence per foto strong match (di luar foto terbaik)
+_AGG_BOOST_CAP       = 0.10   # boost maksimum +10%
+
+
 def search_by_image(image_bytes: bytes,
                     top_k: int = DEFAULT_TOP_K,
                     threshold: float = DEFAULT_THRESHOLD) -> list[dict]:
     """
-    Cari part berdasarkan foto query.
+    Cari part berdasarkan foto query — DENGAN PN-level aggregate scoring.
+
+    Flow:
+      1. Compute embedding query
+      2. Fetch top_k × 5 foto kandidat dari DB (over-fetch)
+      3. Group per PN, ambil foto similarity tertinggi sebagai representative
+      4. Hitung confidence boost: PN dengan banyak foto strong match dapat bonus
+         (tanda kepercayaan: bukan fluke 1 foto kebetulan mirip)
+      5. Sort by aggregated similarity, return top_k PN unik
 
     Args:
         image_bytes  — foto query (jpg/png/webp bytes)
-        top_k        — jumlah hasil max
-        threshold    — similarity minimum (0.0–1.0); 0.70 = 70%
+        top_k        — jumlah PN unik max yang di-return
+        threshold    — aggregated similarity minimum (0.0–1.0)
 
-    Return list of dict (urut similarity desc):
-      [{ "part_number": str, "sims_url": str, "similarity": float, "distance": float }, ...]
+    Return list of dict (urut similarity desc, 1 entry per PN):
+      [{
+        "part_number":    str,
+        "sims_url":       str,    # foto terbaik untuk preview
+        "similarity":     float,  # aggregated score (base + boost)
+        "raw_similarity": float,  # raw max sim (sebelum boost)
+        "n_matches":      int,    # total foto PN ini di top-50
+        "n_strong":       int,    # berapa di antara n_matches yang ≥ 70%
+        "boost":          float,  # bonus yang ditambahkan
+        "distance":       float,
+      }, ...]
     """
     if not _is_configured():
         return []
@@ -767,6 +792,9 @@ def search_by_image(image_bytes: bytes,
     # threshold similarity 0.70  →  cosine distance < 0.30
     distance_threshold = max(0.0, min(1.0 - threshold, 2.0))
 
+    # Over-fetch: untuk aggregate per PN, butuh lebih banyak foto kandidat
+    fetch_count = max(int(top_k) * _AGG_FETCH_MULT, _AGG_FETCH_MIN)
+
     try:
         resp = requests.post(
             _rpc_url(RPC_SEARCH),
@@ -774,7 +802,7 @@ def search_by_image(image_bytes: bytes,
             json={
                 "query_embedding": _vec_to_str(query_vec),
                 "match_threshold": distance_threshold,
-                "match_count":     int(top_k),
+                "match_count":     fetch_count,
             },
             timeout=HTTP_TIMEOUT,
         )
@@ -786,15 +814,54 @@ def search_by_image(image_bytes: bytes,
         print(f"[image_search] RPC search error: {e}")
         return []
 
-    out = []
+    # ── Group per PN, simpan foto terbaik + statistik ──
+    by_pn: dict[str, dict] = {}
     for r in rows:
-        out.append({
-            "part_number": r.get("part_number", ""),
-            "sims_url":    r.get("sims_url", ""),
-            "similarity":  float(r.get("similarity") or 0.0),
-            "distance":    float(r.get("distance")   or 0.0),
+        pn = r.get("part_number", "")
+        if not pn:
+            continue
+        sim = float(r.get("similarity") or 0.0)
+        url = r.get("sims_url", "")
+
+        entry = by_pn.setdefault(pn, {
+            "part_number": pn,
+            "best_url":    url,
+            "best_sim":    sim,
+            "n_matches":   0,
+            "n_strong":    0,
         })
-    return out
+        if sim > entry["best_sim"]:
+            entry["best_sim"] = sim
+            entry["best_url"] = url
+        entry["n_matches"] += 1
+        if sim >= _AGG_STRONG_TH:
+            entry["n_strong"] += 1
+
+    # ── Hitung aggregated score + confidence boost ──
+    # Boost berdasarkan jumlah strong match SELAIN foto terbaik —
+    # bukti bahwa banyak sudut/lighting tetap mirip.
+    aggregated: list[dict] = []
+    for pn, info in by_pn.items():
+        extra_strong = max(0, info["n_strong"] - 1)
+        boost        = min(_AGG_BOOST_PER_MATCH * extra_strong, _AGG_BOOST_CAP)
+        agg_score    = min(info["best_sim"] + boost, 1.0)
+        aggregated.append({
+            "part_number":    pn,
+            "sims_url":       info["best_url"],
+            "similarity":     agg_score,
+            "raw_similarity": info["best_sim"],
+            "n_matches":      info["n_matches"],
+            "n_strong":       info["n_strong"],
+            "boost":          boost,
+            "distance":       1.0 - info["best_sim"],
+        })
+
+    aggregated.sort(key=lambda x: x["similarity"], reverse=True)
+
+    if threshold > 0:
+        aggregated = [a for a in aggregated if a["similarity"] >= threshold]
+
+    return aggregated[:int(top_k)]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -809,6 +876,11 @@ _SMART_ABS_FLOOR = 0.55
 _SMART_REL_DROP  = 0.15
 _SMART_CLIFF     = 0.08
 _SMART_HIGH_CONF = 0.80
+
+# Ambiguous mode: top-N dalam gap kecil → tidak pasti mana yang BEST
+# Tidak aktif kalau top sim sudah tinggi (≥80%) — di zona itu semua match valid.
+_AMBIGUOUS_GAP       = 0.05
+_AMBIGUOUS_HIGH_CONF = 0.80
 
 
 def smart_filter_results(results: list[dict]) -> dict:
@@ -878,12 +950,28 @@ def smart_filter_results(results: list[dict]) -> dict:
     else:
         mode = "weak"
 
+    # ── Ambiguous detection ──
+    # Saat top-N dalam gap kecil DAN top sim tidak tinggi → sistem tidak yakin.
+    # Skip kalau top ≥ 0.80 (zona high-conf, multiple match valid).
+    ambiguous       = False
+    ambiguous_count = 1
+    if len(kept) >= 2 and top_sim < _AMBIGUOUS_HIGH_CONF:
+        for r in kept[1:]:
+            if (top_sim - r["similarity"]) < _AMBIGUOUS_GAP:
+                ambiguous_count += 1
+            else:
+                break
+        if ambiguous_count >= 2:
+            ambiguous = True
+
     return {
-        "kept":    kept,
-        "dropped": dropped,
-        "reason":  reason,
-        "mode":    mode,
-        "top_sim": top_sim,
+        "kept":            kept,
+        "dropped":         dropped,
+        "reason":          reason,
+        "mode":            mode,
+        "top_sim":         top_sim,
+        "ambiguous":       ambiguous,
+        "ambiguous_count": ambiguous_count,
     }
 
 
@@ -1044,10 +1132,19 @@ def _try_get_part_name(pn: str) -> str:
 
 def render_search_image_tab():
     """Tab user: Cari Part by Foto."""
-    st.markdown("### 🖼️ Cari Part by Foto")
-    st.caption(
-        "Upload foto part, sistem akan mencari Part Number yang paling mirip "
-        "berdasarkan visual (bentuk, warna, tekstur)."
+    # ── Header ringkas ─────────────────────────────────────────────────────
+    st.markdown(
+        """
+        <div style="margin-bottom:12px;">
+          <h2 style="margin:0; font-size:24px; font-weight:700;">
+            🖼️ Cari Part by Foto
+          </h2>
+          <p style="color:#6b7280; font-size:13px; margin:4px 0 0 0;">
+            Upload foto part → AI cari Part Number paling mirip dari index visual.
+          </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     if not _TORCH_AVAILABLE:
@@ -1064,12 +1161,8 @@ def render_search_image_tab():
         )
         return
 
-    # ── Statistik cepat di atas ──
+    # ── Statistik index sebagai pill compact ──────────────────────────────
     stats = get_index_stats()
-    col_s1, col_s2 = st.columns(2)
-    col_s1.metric("PN ter-index", f"{stats['total_pn']:,}")
-    col_s2.metric("Total foto", f"{stats['total_images']:,}")
-
     if stats["total_pn"] == 0:
         st.info(
             "ℹ️ Belum ada PN yang di-index. "
@@ -1077,57 +1170,135 @@ def render_search_image_tab():
         )
         return
 
-    st.markdown("---")
+    last_indexed = stats.get("last_indexed_at") or "—"
+    if isinstance(last_indexed, str) and len(last_indexed) >= 16:
+        last_indexed = last_indexed[:16].replace("T", " ")
 
-    # ── Upload foto ──
-    col_upload, col_preview = st.columns([3, 2])
+    st.markdown(
+        f"""
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+          <span style="background:#eff6ff; color:#1e40af; padding:4px 12px;
+                       border-radius:20px; font-size:12px; font-weight:600;">
+            📦 {stats['total_pn']:,} PN ter-index
+          </span>
+          <span style="background:#f0fdf4; color:#166534; padding:4px 12px;
+                       border-radius:20px; font-size:12px; font-weight:600;">
+            🖼️ {stats['total_images']:,} foto
+          </span>
+          <span style="background:#fefce8; color:#854d0e; padding:4px 12px;
+                       border-radius:20px; font-size:12px; font-weight:600;">
+            🕐 Update: {last_indexed}
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with col_upload:
-        uploaded = st.file_uploader(
-            "📤 Upload foto part:",
-            type=["jpg", "jpeg", "png", "webp"],
-            key="img_search_uploader",
-            help="Format: JPG, JPEG, PNG, WEBP",
+    # ── Tips foto bagus (collapsible) ─────────────────────────────────────
+    with st.expander("💡 Tips foto untuk hasil terbaik", expanded=False):
+        st.markdown(
+            """
+            - **Sudut**: foto dari depan atau samping, hindari sangat miring
+            - **Background**: polos & kontras (lantai putih, kain gelap)
+            - **Cahaya**: terang & merata, hindari bayangan kuat / silau
+            - **Fokus**: crop ke part, buang background yang dominan
+            - **Resolusi**: ≥ 400×400 px (lebih besar lebih baik)
+            - **Format**: JPG, PNG, atau WEBP
+            """
         )
 
-        if uploaded is not None:
-            st.session_state[_SS_QUERY_BYTES] = uploaded.read()
-            st.session_state[_SS_QUERY_NAME]  = uploaded.name
+    # ── Upload section (bordered container) ───────────────────────────────
+    upload_box = st.container(border=True)
+    with upload_box:
+        col_upload, col_preview = st.columns([3, 2], gap="medium")
 
-        top_k = st.slider(
-            "Jumlah kandidat dipertimbangkan:",
-            min_value=5, max_value=30,
-            value=DEFAULT_TOP_K, step=1,
-            key="img_search_topk",
-            help="Smart filter akan menyaring otomatis dari kandidat ini.",
-        )
-        st.caption(
-            "🤖 **Smart filter aktif** — hasil tidak relevan disaring otomatis "
-            "berdasarkan distribusi similarity (deteksi noise & jurang score)."
-        )
-
-        col_b1, col_b2 = st.columns([3, 1])
-        with col_b1:
-            do_search = st.button(
-                "🔍 Cari Part", type="primary",
-                use_container_width=True,
-                disabled=not st.session_state.get(_SS_QUERY_BYTES),
-                key="btn_img_search",
+        with col_upload:
+            uploaded = st.file_uploader(
+                "📤 **Upload atau drag-drop foto part di sini**",
+                type=["jpg", "jpeg", "png", "webp"],
+                key="img_search_uploader",
+                help="Format didukung: JPG, JPEG, PNG, WEBP. Max 200 MB.",
             )
-        with col_b2:
-            if st.button("✖", use_container_width=True,
-                         key="btn_img_clear", help="Reset"):
-                st.session_state.pop(_SS_QUERY_BYTES, None)
-                st.session_state.pop(_SS_QUERY_NAME,  None)
-                st.session_state.pop(_SS_RESULTS,     None)
-                st.rerun()
 
-    with col_preview:
-        q_bytes = st.session_state.get(_SS_QUERY_BYTES)
-        q_name  = st.session_state.get(_SS_QUERY_NAME, "")
-        if q_bytes:
-            st.markdown("**Preview foto query:**")
-            st.image(q_bytes, use_container_width=True, caption=q_name[:40])
+            if uploaded is not None:
+                st.session_state[_SS_QUERY_BYTES] = uploaded.read()
+                st.session_state[_SS_QUERY_NAME]  = uploaded.name
+
+            q_bytes_check = st.session_state.get(_SS_QUERY_BYTES)
+
+            # Action buttons
+            col_b1, col_b2 = st.columns([4, 1])
+            with col_b1:
+                do_search = st.button(
+                    "🔍 **Cari Part Sekarang**", type="primary",
+                    use_container_width=True,
+                    disabled=not q_bytes_check,
+                    key="btn_img_search",
+                )
+            with col_b2:
+                if st.button(
+                    "🔄", use_container_width=True,
+                    key="btn_img_clear",
+                    help="Reset — hapus foto & hasil",
+                ):
+                    st.session_state.pop(_SS_QUERY_BYTES, None)
+                    st.session_state.pop(_SS_QUERY_NAME,  None)
+                    st.session_state.pop(_SS_RESULTS,     None)
+                    st.rerun()
+
+            # Advanced settings (collapsed default)
+            with st.expander("⚙️ Pengaturan lanjut", expanded=False):
+                top_k = st.slider(
+                    "Jumlah PN dipertimbangkan",
+                    min_value=5, max_value=30,
+                    value=DEFAULT_TOP_K, step=1,
+                    key="img_search_topk",
+                    help=(
+                        "Setelah smart filter, dari N PN ini diambil yang paling relevan. "
+                        "Lebih tinggi = lebih banyak kandidat dipertimbangkan."
+                    ),
+                )
+                st.caption(
+                    "🤖 **Smart filter + PN-level aggregate scoring** aktif otomatis — "
+                    "hasil disaring berdasarkan distribusi similarity dan multi-foto match."
+                )
+
+        with col_preview:
+            q_bytes = st.session_state.get(_SS_QUERY_BYTES)
+            q_name  = st.session_state.get(_SS_QUERY_NAME, "")
+            if q_bytes:
+                size_kb = len(q_bytes) / 1024
+                st.markdown(
+                    f"""
+                    <div style="font-size:13px; font-weight:600; margin-bottom:4px;">
+                      📸 Preview foto query
+                    </div>
+                    <div style="color:#6b7280; font-size:11px; margin-bottom:4px;
+                                white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+                         title="{q_name}">
+                      {q_name[:50]} · {size_kb:.0f} KB
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.image(q_bytes, use_container_width=True)
+            else:
+                # Empty preview placeholder
+                st.markdown(
+                    """
+                    <div style="border:2px dashed #e5e7eb; border-radius:10px;
+                                padding:20px; text-align:center; color:#9ca3af;
+                                min-height:180px; display:flex; flex-direction:column;
+                                align-items:center; justify-content:center;
+                                background:#fafafa;">
+                      <div style="font-size:42px; line-height:1;">📷</div>
+                      <div style="font-size:12px; margin-top:8px;">
+                        Preview foto query<br>akan tampil di sini
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
     # ── Eksekusi search ──
     if do_search and q_bytes:
@@ -1143,12 +1314,14 @@ def render_search_image_tab():
             filtered = smart_filter_results(raw)
             elapsed  = time.time() - t0
 
-        st.session_state[_SS_RESULTS]            = filtered["kept"]
-        st.session_state["_img_search_fallback"] = filtered["dropped"][:5]
-        st.session_state["_img_search_filter_reason"] = filtered["reason"]
-        st.session_state["_img_search_filter_mode"]   = filtered["mode"]
-        st.session_state["_img_search_top_sim"]       = filtered["top_sim"]
-        st.session_state["_img_search_elapsed"]       = elapsed
+        st.session_state[_SS_RESULTS]                  = filtered["kept"]
+        st.session_state["_img_search_fallback"]       = filtered["dropped"][:5]
+        st.session_state["_img_search_filter_reason"]  = filtered["reason"]
+        st.session_state["_img_search_filter_mode"]    = filtered["mode"]
+        st.session_state["_img_search_top_sim"]        = filtered["top_sim"]
+        st.session_state["_img_search_ambiguous"]      = filtered["ambiguous"]
+        st.session_state["_img_search_ambiguous_count"] = filtered["ambiguous_count"]
+        st.session_state["_img_search_elapsed"]        = elapsed
         st.rerun()
 
     # ── Tampilkan hasil ──
@@ -1163,15 +1336,32 @@ def render_search_image_tab():
     fallback      = st.session_state.get("_img_search_fallback", [])
 
     st.markdown("---")
-    st.markdown(f"### 📋 Hasil Pencarian ({len(results)} ditemukan, {elapsed:.2f}s)")
 
-    # Badge confidence dari smart filter
+    # ── Result header dengan summary inline ───────────────────────────────
+    n_kept = len(results)
+    n_drop = len(fallback)
+    drop_text = f" · 🗑️ {n_drop} disaring" if n_drop > 0 else ""
+
+    st.markdown(
+        f"""
+        <div style="display:flex; justify-content:space-between; align-items:flex-end;
+                    margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+          <h3 style="margin:0; font-size:20px;">📋 Hasil Pencarian</h3>
+          <div style="color:#6b7280; font-size:12px;">
+            ⚡ {elapsed:.2f}s · ✅ {n_kept} cocok{drop_text}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Badge confidence dari smart filter (compact)
     if filter_mode == "strong":
-        st.success(f"✅ **Match kuat** — top similarity {top_sim*100:.1f}%. Filter: {filter_reason}.")
+        st.success(f"✅ **Match kuat** — top similarity **{top_sim*100:.1f}%**")
     elif filter_mode == "moderate":
-        st.info(f"ℹ️ **Match sedang** — top similarity {top_sim*100:.1f}%. Filter: {filter_reason}.")
+        st.info(f"ℹ️ **Match sedang** — top similarity **{top_sim*100:.1f}%**")
     elif filter_mode == "weak":
-        st.warning(f"⚠️ **Match lemah** — top similarity hanya {top_sim*100:.1f}%. Filter: {filter_reason}.")
+        st.warning(f"⚠️ **Match lemah** — top similarity hanya **{top_sim*100:.1f}%** — pertimbangkan foto lebih jelas")
 
     if not results:
         if fallback:
@@ -1180,7 +1370,10 @@ def render_search_image_tab():
                 f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%** — "
                 f"kemungkinan part belum di-index, atau foto query terlalu beda dari foto SIMS."
             )
-            with st.expander(f"🔍 Lihat {len(fallback)} kandidat terdekat (low confidence)", expanded=False):
+            with st.expander(
+                f"🔍 Lihat {len(fallback)} kandidat terdekat (low confidence)",
+                expanded=False,
+            ):
                 for i in range(0, len(fallback), 2):
                     cols = st.columns(2)
                     for j, col in enumerate(cols):
@@ -1196,16 +1389,101 @@ def render_search_image_tab():
             )
         return
 
-    # Grid 2 kolom untuk hasil lolos filter
-    for i in range(0, len(results), 2):
-        cols = st.columns(2)
-        for j, col in enumerate(cols):
-            idx = i + j
-            if idx >= len(results):
-                continue
-            r = results[idx]
-            with col:
-                _render_result_card(idx + 1, r)
+    is_ambiguous = st.session_state.get("_img_search_ambiguous", False)
+    ambig_count  = st.session_state.get("_img_search_ambiguous_count", 1)
+
+    if is_ambiguous:
+        # ── Ambiguous mode: top-N sejajar, no BEST MATCH crown ────────────
+        gap_pct = _AMBIGUOUS_GAP * 100
+        st.warning(
+            f"🤔 **Kandidat ambigu** — **{ambig_count}** hasil punya similarity "
+            f"sangat berdekatan (gap < {gap_pct:.0f}%). Sistem tidak yakin mana "
+            f"yang paling tepat — silakan **verifikasi visual** untuk pilih yang benar."
+        )
+        st.markdown(
+            """
+            <div style="margin:8px 0 6px 0; color:#92400e; font-size:12px;
+                        background:#fffbeb; border-left:4px solid #f59e0b;
+                        padding:8px 12px; border-radius:4px;">
+              💡 <b>Tip:</b> kalau sering ambigu, coba upload foto dengan
+              background polos & crop tight ke part — kurangi noise visual
+              seperti watermark/logo/permukaan tekstur.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Render top ambig_count sebagai grid 2 kolom equal-weight
+        ambiguous_results = results[:ambig_count]
+        for i in range(0, len(ambiguous_results), 2):
+            cols = st.columns(2)
+            for j, col in enumerate(cols):
+                idx = i + j
+                if idx >= len(ambiguous_results):
+                    continue
+                with col:
+                    _render_result_card(idx + 1, ambiguous_results[idx],
+                                        is_best=False, is_ambiguous=True)
+
+        # Sisa hasil di bawah tier ambiguous
+        rest_results = results[ambig_count:]
+        if rest_results:
+            st.markdown(
+                """
+                <div style="margin:14px 0 6px 0; color:#6b7280; font-size:12px;
+                            font-weight:600;">
+                  🔎 Kandidat dengan similarity lebih rendah
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            for i in range(0, len(rest_results), 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    idx = i + j
+                    if idx >= len(rest_results):
+                        continue
+                    with col:
+                        _render_result_card(idx + ambig_count + 1,
+                                            rest_results[idx])
+    else:
+        # ── Normal mode: BEST MATCH highlight + Kandidat lain ─────────────
+        st.markdown(
+            """
+            <div style="margin:14px 0 6px 0; display:flex; align-items:center; gap:6px;">
+              <div style="background:linear-gradient(90deg,#fbbf24,#f59e0b);
+                          color:white; padding:3px 10px; border-radius:12px;
+                          font-size:11px; font-weight:700; letter-spacing:0.5px;">
+                🏆 BEST MATCH
+              </div>
+              <div style="color:#6b7280; font-size:11px;">
+                Hasil dengan similarity tertinggi
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        _render_result_card(1, results[0], is_best=True)
+
+        other_results = results[1:]
+        if other_results:
+            st.markdown(
+                """
+                <div style="margin:14px 0 6px 0; color:#374151; font-size:13px;
+                            font-weight:600;">
+                  🔎 Kandidat lain
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            for i in range(0, len(other_results), 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    idx = i + j
+                    if idx >= len(other_results):
+                        continue
+                    with col:
+                        _render_result_card(idx + 2, other_results[idx])
 
     # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
     if fallback:
@@ -1224,17 +1502,29 @@ def render_search_image_tab():
                         _render_result_card(len(results) + idx + 1, fallback[idx])
 
 
-_CARD_IMG_MAX_PX = 150   # tinggi foto dalam card hasil
+_CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
+_CARD_IMG_BEST_PX     = 360   # tinggi foto dalam card BEST MATCH (lebih besar)
 
 
-def _render_result_card(rank: int, r: dict):
-    """Render 1 kartu hasil pencarian (kompak — foto + header + button)."""
+def _render_result_card(rank: int, r: dict, is_best: bool = False,
+                        is_ambiguous: bool = False):
+    """
+    Render 1 kartu hasil pencarian.
+    is_best=True       → BEST MATCH: foto besar, border emas, font naik.
+    is_ambiguous=True  → kandidat ambigu: foto medium, border oranye dashed.
+    """
     import base64
 
     pn         = r["part_number"]
     sim_pct    = r["similarity"] * 100.0
     sims_url   = r["sims_url"]
     part_name  = _try_get_part_name(pn) or "—"
+
+    # PN-level aggregate fields (mungkin tidak ada untuk legacy callers)
+    n_matches = r.get("n_matches", 0)
+    n_strong  = r.get("n_strong", 0)
+    raw_sim   = r.get("raw_similarity")
+    boost     = r.get("boost", 0.0)
 
     if sim_pct >= 90:
         badge_color = "#16a34a"   # hijau
@@ -1245,6 +1535,45 @@ def _render_result_card(rank: int, r: dict):
     else:
         badge_color = "#6b7280"   # abu
 
+    # Confidence chip: tampil saat PN ini punya banyak foto match
+    confidence_chip = ""
+    if n_strong >= 2:
+        tooltip = (
+            f"{n_strong} foto PN ini punya similarity ≥70% "
+            f"(boost +{boost*100:.1f}%). Top raw: {(raw_sim or 0)*100:.1f}%."
+        )
+        confidence_chip = (
+            f'<span style="background:#dcfce7; color:#166534; padding:1px 6px; '
+            f'border-radius:8px; font-size:10px; font-weight:600; margin-left:4px;" '
+            f'title="{tooltip}">✨ {n_strong} foto</span>'
+        )
+    elif n_matches >= 3:
+        confidence_chip = (
+            f'<span style="background:#fef3c7; color:#92400e; padding:1px 6px; '
+            f'border-radius:8px; font-size:10px; font-weight:600; margin-left:4px;" '
+            f'title="{n_matches} foto PN ini muncul di kandidat (cuma {n_strong} strong).">'
+            f'{n_matches} foto</span>'
+        )
+
+    # Variasi style: BEST > AMBIGUOUS > normal
+    if is_best:
+        img_h, pn_font, name_font, badge_font = _CARD_IMG_BEST_PX, "20px", "13px", "14px"
+        badge_pad, card_pad = "3px 12px", "14px"
+        card_border = "2px solid #f59e0b; box-shadow:0 4px 12px rgba(245,158,11,0.15);"
+        card_bg     = "linear-gradient(180deg,#fffbeb,#ffffff)"
+    elif is_ambiguous:
+        # Foto agak besar (di antara best & normal), border oranye dashed,
+        # tanpa shadow — sinyal visual: "salah satu dari ini"
+        img_h, pn_font, name_font, badge_font = 260, "15px", "12px", "12px"
+        badge_pad, card_pad = "2px 10px", "10px"
+        card_border = "2px dashed #f59e0b;"
+        card_bg     = "#fffbeb"
+    else:
+        img_h, pn_font, name_font, badge_font = _CARD_IMG_MAX_PX, "13px", "11px", "11px"
+        badge_pad, card_pad = "1px 8px", "8px"
+        card_border = "1px solid #e5e7eb;"
+        card_bg     = "#fafafa"
+
     # Ambil foto + encode base64 → inline ke HTML card biar height fixable
     img_html = (
         '<div style="color:#9ca3af; font-size:11px; padding:20px 0;">'
@@ -1254,7 +1583,6 @@ def _render_result_card(rank: int, r: dict):
         img_bytes = _download_image(sims_url)
         if img_bytes:
             b64  = base64.b64encode(img_bytes).decode()
-            # detect mime sederhana via magic bytes
             if img_bytes[:4] == b"RIFF":
                 mime = "image/webp"
             elif img_bytes[:3] == b"\xff\xd8\xff":
@@ -1265,29 +1593,34 @@ def _render_result_card(rank: int, r: dict):
                 mime = "image/jpeg"
             img_html = (
                 f'<img src="data:{mime};base64,{b64}" '
-                f'style="max-height:{_CARD_IMG_MAX_PX}px; max-width:100%; '
-                f'object-fit:contain;"/>'
+                f'style="max-height:{img_h}px; max-width:100%; object-fit:contain;"/>'
             )
 
     st.markdown(
         f"""
-        <div style="border:1px solid #e5e7eb; border-radius:8px; padding:8px;
-                    margin-bottom:4px; background:#fafafa;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div style="font-weight:600; font-size:13px;">#{rank}&nbsp;{pn}</div>
-            <div style="background:{badge_color}; color:white; padding:1px 8px;
-                        border-radius:10px; font-weight:600; font-size:11px;">
+        <div style="border-radius:10px; padding:{card_pad}; margin-bottom:4px;
+                    background:{card_bg}; {card_border}">
+          <div style="display:flex; justify-content:space-between; align-items:center;
+                      gap:8px;">
+            <div style="font-weight:700; font-size:{pn_font};
+                        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+              #{rank}&nbsp;{pn}{confidence_chip}
+            </div>
+            <div style="background:{badge_color}; color:white; padding:{badge_pad};
+                        border-radius:14px; font-weight:700; font-size:{badge_font};
+                        flex-shrink:0;">
               {sim_pct:.1f}%
             </div>
           </div>
-          <div style="color:#374151; font-size:11px; margin:2px 0 6px 0;
+          <div style="color:#374151; font-size:{name_font}; margin:4px 0 8px 0;
                       white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
                title="{part_name}">
             {part_name}
           </div>
-          <div style="text-align:center; height:{_CARD_IMG_MAX_PX}px; display:flex;
+          <div style="text-align:center; height:{img_h}px; display:flex;
                       align-items:center; justify-content:center;
-                      background:#fff; border-radius:6px;">
+                      background:#fff; border-radius:8px;
+                      border:1px solid #f3f4f6;">
             {img_html}
           </div>
         </div>
@@ -1296,7 +1629,13 @@ def _render_result_card(rank: int, r: dict):
     )
 
     # Tombol detail kompak
-    if st.button(f"🔎 Detail {pn}", key=f"img_res_detail_{rank}_{pn}",
-                 use_container_width=True):
+    if is_best:
+        btn_label, btn_type = f"🔎 Cari Detail {pn}", "primary"
+    elif is_ambiguous:
+        btn_label, btn_type = f"🔎 Cari Detail {pn}", "primary"
+    else:
+        btn_label, btn_type = f"🔎 Detail {pn}", "secondary"
+    if st.button(btn_label, key=f"img_res_detail_{rank}_{pn}",
+                 use_container_width=True, type=btn_type):
         st.session_state["_trigger_search_pn"] = pn
         st.rerun()
