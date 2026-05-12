@@ -1583,36 +1583,38 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
     else:
         flex_center = ""
 
-    st.markdown(
-        f"""
-        <div style="border-radius:10px; padding:{card_pad}; margin-bottom:4px;
-                    background:{card_bg}; {card_border}">
-          <div style="display:flex; justify-content:space-between; align-items:center;
-                      gap:8px;">
-            <div style="font-weight:700; font-size:{pn_font};
-                        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-              #{rank}&nbsp;{pn}{confidence_chip}
-            </div>
-            <div style="background:{badge_color}; color:white; padding:{badge_pad};
-                        border-radius:14px; font-weight:700; font-size:{badge_font};
-                        flex-shrink:0;">
-              {sim_pct:.1f}%
-            </div>
-          </div>
-          <div style="color:#374151; font-size:{name_font}; margin:4px 0 8px 0;
-                      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
-               title="{part_name}">
-            {part_name}
-          </div>
-          <div style="height:{img_h}px; background:#fff; border-radius:8px;
-                      border:1px solid #f3f4f6; overflow:hidden;
-                      {img_bg_style} {flex_center}">
-            {img_inner_html}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # Build HTML as single line (no newlines/indent) — penting karena
+    # markdown processor Streamlit treats indented HTML sebagai code block,
+    # dan multi-line attribute value (style=...) yang mengandung base64
+    # panjang bisa bikin parser bocor `</div>` sebagai teks.
+    card_html = (
+        f'<div style="border-radius:10px;padding:{card_pad};margin-bottom:4px;'
+        f'background:{card_bg};{card_border}">'
+        f'<div style="display:flex;justify-content:space-between;'
+        f'align-items:center;gap:8px;">'
+        f'<div style="font-weight:700;font-size:{pn_font};'
+        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+        f'#{rank}&nbsp;{pn}{confidence_chip}'
+        f'</div>'
+        f'<div style="background:{badge_color};color:white;padding:{badge_pad};'
+        f'border-radius:14px;font-weight:700;font-size:{badge_font};'
+        f'flex-shrink:0;">'
+        f'{sim_pct:.1f}%'
+        f'</div>'
+        f'</div>'
+        f'<div style="color:#374151;font-size:{name_font};margin:4px 0 8px 0;'
+        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" '
+        f'title="{part_name}">'
+        f'{part_name}'
+        f'</div>'
+        f'<div style="height:{img_h}px;background:#fff;border-radius:8px;'
+        f'border:1px solid #f3f4f6;overflow:hidden;'
+        f'{img_bg_style}{flex_center}">'
+        f'{img_inner_html}'
+        f'</div>'
+        f'</div>'
     )
+    st.markdown(card_html, unsafe_allow_html=True)
 
     # Tombol detail kompak
     if is_best:
