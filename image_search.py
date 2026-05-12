@@ -1374,14 +1374,7 @@ def render_search_image_tab():
                 f"🔍 Lihat {len(fallback)} kandidat terdekat (low confidence)",
                 expanded=False,
             ):
-                for i in range(0, len(fallback), 2):
-                    cols = st.columns(2)
-                    for j, col in enumerate(cols):
-                        idx = i + j
-                        if idx >= len(fallback):
-                            continue
-                        with col:
-                            _render_result_card(idx + 1, fallback[idx])
+                _render_card_grid(fallback, start_rank=1)
         else:
             st.warning(
                 "⚠️ Tidak ada hasil sama sekali. "
@@ -1415,15 +1408,7 @@ def render_search_image_tab():
 
         # Render top ambig_count sebagai grid 2 kolom equal-weight
         ambiguous_results = results[:ambig_count]
-        for i in range(0, len(ambiguous_results), 2):
-            cols = st.columns(2)
-            for j, col in enumerate(cols):
-                idx = i + j
-                if idx >= len(ambiguous_results):
-                    continue
-                with col:
-                    _render_result_card(idx + 1, ambiguous_results[idx],
-                                        is_best=False, is_ambiguous=True)
+        _render_card_grid(ambiguous_results, start_rank=1, is_ambiguous=True)
 
         # Sisa hasil di bawah tier ambiguous
         rest_results = results[ambig_count:]
@@ -1437,25 +1422,10 @@ def render_search_image_tab():
                 """,
                 unsafe_allow_html=True,
             )
-            for i in range(0, len(rest_results), 2):
-                cols = st.columns(2)
-                for j, col in enumerate(cols):
-                    idx = i + j
-                    if idx >= len(rest_results):
-                        continue
-                    with col:
-                        _render_result_card(idx + ambig_count + 1,
-                                            rest_results[idx])
+            _render_card_grid(rest_results, start_rank=ambig_count + 1)
     else:
         # ── Normal mode: render semua hasil dalam grid 2 kolom ────────────
-        for i in range(0, len(results), 2):
-            cols = st.columns(2)
-            for j, col in enumerate(cols):
-                idx = i + j
-                if idx >= len(results):
-                    continue
-                with col:
-                    _render_result_card(idx + 1, results[idx])
+        _render_card_grid(results, start_rank=1)
 
     # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
     if fallback:
@@ -1464,18 +1434,97 @@ def render_search_image_tab():
             expanded=False,
         ):
             st.caption(f"Disaring karena: {filter_reason}")
-            for i in range(0, len(fallback), 2):
-                cols = st.columns(2)
-                for j, col in enumerate(cols):
-                    idx = i + j
-                    if idx >= len(fallback):
-                        continue
-                    with col:
-                        _render_result_card(len(results) + idx + 1, fallback[idx])
+            _render_card_grid(fallback, start_rank=len(results) + 1)
 
 
 _CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
 _CARD_IMG_BEST_PX     = 360   # tinggi foto dalam card BEST MATCH (lebih besar)
+
+
+# Skeleton card — ditampilkan saat foto SIMS sedang di-prefetch paralel.
+# Pakai animasi pulse via @keyframes (CSS standar, support semua browser).
+_SKELETON_CARD_HTML = """
+<style>
+@keyframes _skel_pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+@keyframes _skel_shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+</style>
+<div style="border-radius:10px; padding:8px; margin-bottom:4px;
+            background:#fafafa; border:1px solid #e5e7eb;">
+  <div style="display:flex; justify-content:space-between; align-items:center;
+              gap:8px; animation:_skel_pulse 1.4s ease-in-out infinite;">
+    <div style="height:14px; width:55%; background:#e5e7eb; border-radius:4px;"></div>
+    <div style="height:18px; width:48px; background:#e5e7eb; border-radius:14px;"></div>
+  </div>
+  <div style="height:11px; width:38%; background:#e5e7eb; border-radius:4px;
+              margin:6px 0 8px 0; animation:_skel_pulse 1.4s ease-in-out infinite;"></div>
+  <div style="height:240px; border-radius:8px; border:1px solid #f3f4f6;
+              background:linear-gradient(90deg,#f3f4f6 0%,#e5e7eb 50%,#f3f4f6 100%);
+              background-size:200% 100%;
+              animation:_skel_shimmer 1.6s linear infinite;
+              display:flex; align-items:center; justify-content:center;
+              color:#9ca3af; font-size:11px; font-weight:500;">
+    📥 Memuat foto…
+  </div>
+  <div style="height:32px; background:#e5e7eb; border-radius:6px; margin-top:8px;
+              animation:_skel_pulse 1.4s ease-in-out infinite;"></div>
+</div>
+"""
+
+
+def _render_card_grid(items: list[dict], start_rank: int = 1,
+                      is_ambiguous: bool = False) -> None:
+    """
+    Render daftar card hasil dalam grid 2-kolom dengan skeleton + prefetch paralel.
+
+    Flow:
+      1. Buat slot kosong (st.empty) di tiap posisi card
+      2. Tampilkan skeleton di semua slot — user langsung lihat layout
+      3. Download semua foto SIMS paralel (ThreadPoolExecutor → disk cache)
+      4. Replace skeleton dengan card asli (foto dari cache → instant)
+
+    Tanpa flow ini, _download_image di-call sequential per card —
+    card terakhir baru render setelah card sebelumnya selesai download.
+    """
+    if not items:
+        return
+
+    # ── Step 1: buat empty slots di grid 2-kolom ──
+    slots: list = []
+    for i in range(0, len(items), 2):
+        cols = st.columns(2)
+        for j, col in enumerate(cols):
+            idx = i + j
+            if idx >= len(items):
+                continue
+            with col:
+                slots.append(st.empty())
+
+    # ── Step 2: tampilkan skeleton segera (user dapat feedback visual) ──
+    for slot in slots:
+        slot.markdown(_SKELETON_CARD_HTML, unsafe_allow_html=True)
+
+    # ── Step 3: prefetch paralel semua foto (populate disk cache) ──
+    urls = [r["sims_url"] for r in items if r.get("sims_url")]
+    if urls:
+        try:
+            with ThreadPoolExecutor(
+                max_workers=min(DOWNLOAD_WORKERS, len(urls))
+            ) as ex:
+                list(ex.map(_download_image, urls))
+        except Exception as e:
+            print(f"[image_search] prefetch error: {e}")
+
+    # ── Step 4: replace skeleton dengan card asli (foto sudah di cache) ──
+    for idx, slot in enumerate(slots):
+        with slot.container():
+            _render_result_card(start_rank + idx, items[idx],
+                                is_ambiguous=is_ambiguous)
 
 
 def _render_result_card(rank: int, r: dict, is_best: bool = False,
