@@ -77,10 +77,11 @@ DINOV2_MODEL_NAME = "dinov2_vitb14"   # base size, 768 dim, ~85 MB
 DINOV2_REPO       = "facebookresearch/dinov2"
 DINOV2_INPUT_SIZE = 224               # patch 14 × 16 = 224
 
-# Parallelism config — di-tune untuk CPU laptop biasa
-DOWNLOAD_WORKERS  = 8                 # foto SIMS download paralel
-EMBED_BATCH_SIZE  = 8                 # DINOv2 forward pass per batch
-                                      # (batch 8 ≈ 1.5GB RAM saat inference)
+# Parallelism config — di-tune untuk Streamlit Cloud (RAM ~1 GB)
+DOWNLOAD_WORKERS  = 3                 # foto SIMS download paralel (was 8)
+EMBED_BATCH_SIZE  = 2                 # DINOv2 forward pass per batch (was 8)
+                                      # batch 2 ≈ 400 MB RAM saat inference
+                                      # (batch 8 ≈ 1.5 GB → OOM di cloud)
 
 # Disk cache foto SIMS — sekali download, re-index PN sama jadi instant
 SIMS_CACHE_DIR    = Path("images/sims_cache")
@@ -1441,61 +1442,35 @@ _CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
 _CARD_IMG_BEST_PX     = 360   # tinggi foto dalam card BEST MATCH (lebih besar)
 
 
-# Skeleton card — ditampilkan saat foto SIMS sedang di-prefetch paralel.
-# Pakai animasi pulse via @keyframes (CSS standar, support semua browser).
-_SKELETON_CARD_HTML = """
-<style>
-@keyframes _skel_pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.45; }
-}
-@keyframes _skel_shimmer {
-  0%   { background-position: -200% 0; }
-  100% { background-position:  200% 0; }
-}
-</style>
-<div style="border-radius:10px; padding:8px; margin-bottom:4px;
-            background:#fafafa; border:1px solid #e5e7eb;">
-  <div style="display:flex; justify-content:space-between; align-items:center;
-              gap:8px; animation:_skel_pulse 1.4s ease-in-out infinite;">
-    <div style="height:14px; width:55%; background:#e5e7eb; border-radius:4px;"></div>
-    <div style="height:18px; width:48px; background:#e5e7eb; border-radius:14px;"></div>
-  </div>
-  <div style="height:11px; width:38%; background:#e5e7eb; border-radius:4px;
-              margin:6px 0 8px 0; animation:_skel_pulse 1.4s ease-in-out infinite;"></div>
-  <div style="height:240px; border-radius:8px; border:1px solid #f3f4f6;
-              background:linear-gradient(90deg,#f3f4f6 0%,#e5e7eb 50%,#f3f4f6 100%);
-              background-size:200% 100%;
-              animation:_skel_shimmer 1.6s linear infinite;
-              display:flex; align-items:center; justify-content:center;
-              color:#9ca3af; font-size:11px; font-weight:500;">
-    📥 Memuat foto…
-  </div>
-  <div style="height:32px; background:#e5e7eb; border-radius:6px; margin-top:8px;
-              animation:_skel_pulse 1.4s ease-in-out infinite;"></div>
-</div>
-"""
-
-
 def _render_card_grid(items: list[dict], start_rank: int = 1,
                       is_ambiguous: bool = False) -> None:
     """
-    Render daftar card hasil dalam grid 2-kolom dengan skeleton + prefetch paralel.
+    Render daftar card hasil dalam grid 2-kolom dengan prefetch paralel.
 
     Flow:
-      1. Buat slot kosong (st.empty) di tiap posisi card
-      2. Tampilkan skeleton di semua slot — user langsung lihat layout
-      3. Download semua foto SIMS paralel (ThreadPoolExecutor → disk cache)
-      4. Replace skeleton dengan card asli (foto dari cache → instant)
+      1. Prefetch semua foto SIMS paralel via ThreadPoolExecutor
+         (spinner terlihat selama prefetch)
+      2. Render cards normal — semua foto sudah di disk cache, instant.
 
-    Tanpa flow ini, _download_image di-call sequential per card —
+    Tanpa prefetch, _download_image di-call sequential per card —
     card terakhir baru render setelah card sebelumnya selesai download.
     """
     if not items:
         return
 
-    # ── Step 1: buat empty slots di grid 2-kolom ──
-    slots: list = []
+    # ── Step 1: prefetch paralel semua foto sebelum render apapun ──
+    urls = [r["sims_url"] for r in items if r.get("sims_url")]
+    if urls:
+        with st.spinner(f"📥 Memuat {len(urls)} foto..."):
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=min(DOWNLOAD_WORKERS, len(urls))
+                ) as ex:
+                    list(ex.map(_download_image, urls))
+            except Exception as e:
+                print(f"[image_search] prefetch error: {e}")
+
+    # ── Step 2: render cards (foto sudah di cache → render bareng-bareng) ──
     for i in range(0, len(items), 2):
         cols = st.columns(2)
         for j, col in enumerate(cols):
@@ -1503,28 +1478,8 @@ def _render_card_grid(items: list[dict], start_rank: int = 1,
             if idx >= len(items):
                 continue
             with col:
-                slots.append(st.empty())
-
-    # ── Step 2: tampilkan skeleton segera (user dapat feedback visual) ──
-    for slot in slots:
-        slot.markdown(_SKELETON_CARD_HTML, unsafe_allow_html=True)
-
-    # ── Step 3: prefetch paralel semua foto (populate disk cache) ──
-    urls = [r["sims_url"] for r in items if r.get("sims_url")]
-    if urls:
-        try:
-            with ThreadPoolExecutor(
-                max_workers=min(DOWNLOAD_WORKERS, len(urls))
-            ) as ex:
-                list(ex.map(_download_image, urls))
-        except Exception as e:
-            print(f"[image_search] prefetch error: {e}")
-
-    # ── Step 4: replace skeleton dengan card asli (foto sudah di cache) ──
-    for idx, slot in enumerate(slots):
-        with slot.container():
-            _render_result_card(start_rank + idx, items[idx],
-                                is_ambiguous=is_ambiguous)
+                _render_result_card(start_rank + idx, items[idx],
+                                    is_ambiguous=is_ambiguous)
 
 
 def _render_result_card(rank: int, r: dict, is_best: bool = False,
