@@ -8,6 +8,4 @@ pycryptodome
 bcrypt
 torch
 torchvision
-rembg
-onnxruntime
 supabase
