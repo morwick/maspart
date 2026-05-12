@@ -25,6 +25,13 @@ from image_search import (
     _is_configured,
     _TORCH_AVAILABLE,
     _TORCH_ERR,
+    _REMBG_AVAILABLE,
+    _REMBG_ERR,
+    PIPELINE_VERSION,
+    ENABLE_BG_REMOVAL,
+    REMBG_MODEL_NAME,
+    ENABLE_QUERY_TTA,
+    TTA_VARIANTS,
     index_part_number,
     index_bulk,
     list_indexed_pns,
@@ -82,6 +89,9 @@ def render_image_index_tab():
         last = last[:16].replace("T", " ")
     col3.metric("Index terakhir", last)
 
+    # ── Pipeline info — preprocessing version & status modul opsional ─────
+    _render_pipeline_panel()
+
     # ── Cache management (expander, default collapsed) ────────────────────
     _render_cache_panel()
 
@@ -102,6 +112,44 @@ def render_image_index_tab():
 
     with tab_list:
         _render_indexed_list()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PIPELINE PANEL — info preprocessing version + modul opsional
+# ══════════════════════════════════════════════════════════════════════════
+
+def _render_pipeline_panel():
+    """
+    Tampilkan versi pipeline preprocessing + status rembg/TTA.
+    Catatan: kalau pipeline berubah (mis. v1 → v2), vektor lama tidak
+    kompatibel dengan query baru → admin harus force re-index.
+    """
+    rembg_status = (
+        f"✅ aktif (model `{REMBG_MODEL_NAME}`)"
+        if (ENABLE_BG_REMOVAL and _REMBG_AVAILABLE)
+        else ("⚠️ disabled di config" if not ENABLE_BG_REMOVAL
+              else f"❌ rembg tidak terinstall ({_REMBG_ERR})")
+    )
+    tta_status = (
+        f"✅ aktif ({TTA_VARIANTS} variants)"
+        if ENABLE_QUERY_TTA else "⚠️ disabled di config"
+    )
+
+    label = f"🔧 Pipeline preprocessing v{PIPELINE_VERSION}"
+    with st.expander(label, expanded=False):
+        st.markdown(
+            f"""
+            - **Background removal (index + query)** — {rembg_status}
+            - **Resize-with-pad (letterbox)** — ✅ aktif
+            - **Query-side TTA** — {tta_status}
+            """
+        )
+        st.caption(
+            "📌 Vektor lama (pipeline v1) tidak kompatibel dengan query v2. "
+            "Setelah upgrade preprocessing, **re-index** semua PN existing "
+            "via tab **📦 Bulk PN** → centang **Force re-index** → tempel "
+            "daftar PN yang sudah ter-index."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -278,16 +326,34 @@ def _render_bulk_mode():
     pn_list_unique = list(dict.fromkeys(pn_list))
     n_unique = len(pn_list_unique)
 
-    skip_existing = st.checkbox(
-        "⚡ **Fast mode** — skip PN yang sudah ter-index (tanpa fetch SIMS)",
-        value=True,
-        key="img_idx_bulk_skip",
-        help=(
-            "Cek tabel part_image_index sekali di awal, lalu skip PN yang sudah ada. "
-            "Jauh lebih cepat untuk bulk besar. Matikan kalau ingin re-check semua PN "
-            "untuk foto SIMS yang baru ditambahkan."
-        ),
-    )
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        skip_existing = st.checkbox(
+            "⚡ **Fast mode** — skip PN yang sudah ter-index",
+            value=True,
+            key="img_idx_bulk_skip",
+            help=(
+                "Cek tabel part_image_index sekali di awal, lalu skip PN yang sudah ada. "
+                "Jauh lebih cepat untuk bulk besar. Matikan kalau ingin re-check semua PN "
+                "untuk foto SIMS yang baru ditambahkan."
+            ),
+        )
+    with col_opt2:
+        force_reindex = st.checkbox(
+            "🔄 **Force re-index** — hitung ulang embedding semua foto",
+            value=False,
+            key="img_idx_bulk_force",
+            help=(
+                "Re-embed semua foto walau sudah ada di DB. Dipakai saat upgrade "
+                f"pipeline preprocessing (vektor lama tidak kompatibel pipeline v{PIPELINE_VERSION}). "
+                "Otomatis menonaktifkan Fast mode."
+            ),
+        )
+
+    # Force re-index mengalahkan fast mode (mutually exclusive)
+    if force_reindex:
+        skip_existing = False
+        st.caption("ℹ️ **Force re-index aktif** → Fast mode otomatis dinonaktifkan.")
 
     col_a, col_b = st.columns([2, 1])
     with col_a:
@@ -373,7 +439,8 @@ def _render_bulk_mode():
 
         if pns_to_process:
             new_results = index_bulk(pns_to_process, indexed_by=indexed_by,
-                                     progress_callback=_cb)
+                                     progress_callback=_cb,
+                                     force_reindex=force_reindex)
         else:
             new_results = []
             progress_bar.progress(1.0, text="Tidak ada PN baru untuk diproses")

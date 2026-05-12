@@ -58,6 +58,15 @@ except Exception as e:
     _TORCH_AVAILABLE = False
     _TORCH_ERR = str(e)
 
+# ── Lazy import rembg (background removal) — opsional, fallback bila gagal ─
+try:
+    import rembg
+    _REMBG_AVAILABLE = True
+    _REMBG_ERR = None
+except Exception as e:
+    _REMBG_AVAILABLE = False
+    _REMBG_ERR = str(e)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  KONSTANTA
@@ -76,6 +85,22 @@ HTTP_TIMEOUT      = 20
 DINOV2_MODEL_NAME = "dinov2_vitb14"   # base size, 768 dim, ~85 MB
 DINOV2_REPO       = "facebookresearch/dinov2"
 DINOV2_INPUT_SIZE = 224               # patch 14 × 16 = 224
+
+# Pipeline version — bump kalau preprocessing berubah incompatibly.
+# v1 = Resize(256) + CenterCrop(224), tanpa background removal, tanpa TTA.
+# v2 = Background removal (rembg) + resize-with-pad (letterbox), TTA di query.
+PIPELINE_VERSION = 2
+
+# Background removal (rembg) — diterapkan ke index DAN query untuk konsistensi.
+# Vektor v1 (tanpa rembg) tidak cocok dengan query v2 → admin perlu re-index.
+ENABLE_BG_REMOVAL   = True
+REMBG_MODEL_NAME    = "u2netp"        # 5 MB, cepat. Alt: "u2net" (170 MB, lebih akurat)
+REMBG_FLATTEN_COLOR = (255, 255, 255) # latar putih setelah remove (cocok untuk letterbox)
+
+# Query-side TTA — averaging beberapa augmentasi untuk robust ke pose foto user.
+# Hanya berlaku di query (search), TIDAK di index (boros & redundant).
+ENABLE_QUERY_TTA = True
+TTA_VARIANTS     = 4                  # original + hflip + zoom-in + zoom-out
 
 # Parallelism config — di-tune untuk Streamlit Cloud (RAM ~1 GB)
 DOWNLOAD_WORKERS  = 3                 # foto SIMS download paralel (was 8)
@@ -171,10 +196,10 @@ def _load_model():
 
     model.eval()
 
-    # DINOv2 menggunakan ImageNet mean/std untuk normalisasi.
+    # Preprocess di sini cuma ToTensor + Normalize (ImageNet mean/std).
+    # Resize-with-pad + background removal di-handle di _prepare_pil sebelum
+    # tensor — supaya input PIL bisa di-augmentasi (TTA) lebih mudah.
     preprocess = transforms.Compose([
-        transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(DINOV2_INPUT_SIZE),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -186,12 +211,121 @@ def _load_model():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  BACKGROUND REMOVAL (rembg) + RESIZE-WITH-PAD
+# ══════════════════════════════════════════════════════════════════════════
+
+@st.cache_resource(show_spinner="🪄 Memuat model background removal...")
+def _load_rembg_session():
+    """
+    Load rembg session sekali, di-share antar request.
+    Default model u2netp (~5 MB) — kompromi akurasi vs RAM untuk Streamlit Cloud.
+    Return None kalau rembg tidak tersedia / gagal load.
+    """
+    if not _REMBG_AVAILABLE:
+        return None
+    try:
+        return rembg.new_session(REMBG_MODEL_NAME)
+    except Exception as e:
+        print(f"[image_search] rembg session load failed: {e}")
+        return None
+
+
+def _remove_background(image_bytes: bytes) -> bytes:
+    """
+    Hapus background → flatten ke putih → return PNG bytes.
+    Graceful fallback ke bytes asli kalau rembg gagal/disabled.
+    """
+    if not ENABLE_BG_REMOVAL or not _REMBG_AVAILABLE:
+        return image_bytes
+
+    session = _load_rembg_session()
+    if session is None:
+        return image_bytes
+
+    try:
+        out = rembg.remove(image_bytes, session=session)  # PNG RGBA bytes
+        img = Image.open(io.BytesIO(out))
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        # Flatten ke latar putih → konsisten dengan padding letterbox.
+        bg = Image.new("RGB", img.size, REMBG_FLATTEN_COLOR)
+        bg.paste(img, mask=img.split()[3])
+        buf = io.BytesIO()
+        bg.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        print(f"[image_search] rembg fail (fallback ke original): {e}")
+        return image_bytes
+
+
+def _resize_with_pad(img: "Image.Image", target: int = DINOV2_INPUT_SIZE,
+                     pad_color=(255, 255, 255)) -> "Image.Image":
+    """
+    Letterbox resize: sisi terpanjang = target, sisi pendek di-pad sampai
+    target × target. Tidak ada pixel yang dibuang (beda dengan CenterCrop).
+    """
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return Image.new("RGB", (target, target), pad_color)
+    scale = target / float(max(w, h))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = img.resize((new_w, new_h), Image.BICUBIC)
+    canvas = Image.new("RGB", (target, target), pad_color)
+    canvas.paste(resized, ((target - new_w) // 2, (target - new_h) // 2))
+    return canvas
+
+
+def _prepare_pil(image_bytes: bytes) -> "Image.Image":
+    """
+    Full preprocessing PIL: bg removal → decode RGB → resize-with-pad 224×224.
+    Output siap dilempar ke `preprocess()` (ToTensor + Normalize).
+    """
+    cleaned = _remove_background(image_bytes)
+    img = Image.open(io.BytesIO(cleaned)).convert("RGB")
+    return _resize_with_pad(img, DINOV2_INPUT_SIZE, REMBG_FLATTEN_COLOR)
+
+
+def _build_tta_variants(img: "Image.Image") -> list:
+    """
+    Bangun N versi augmentasi dari PIL 224×224 untuk query-side TTA.
+
+    Variants:
+      1. Original
+      2. Horizontal flip
+      3. Zoom in   — crop center 90%, resize back ke 224
+      4. Zoom out  — shrink ke 90%, pad ke 224 (latar putih)
+    """
+    target = img.size[0]
+    out = [img, img.transpose(Image.FLIP_LEFT_RIGHT)]
+
+    # Zoom in: crop center 90%
+    crop = int(target * 0.9)
+    off  = (target - crop) // 2
+    zin  = img.crop((off, off, off + crop, off + crop)).resize(
+        (target, target), Image.BICUBIC,
+    )
+    out.append(zin)
+
+    # Zoom out: shrink lalu pad ke 224
+    small = int(target * 0.9)
+    shrunk = img.resize((small, small), Image.BICUBIC)
+    canvas = Image.new("RGB", (target, target), REMBG_FLATTEN_COLOR)
+    pad = (target - small) // 2
+    canvas.paste(shrunk, (pad, pad))
+    out.append(canvas)
+
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  EMBEDDING
 # ══════════════════════════════════════════════════════════════════════════
 
 def compute_embedding(image_bytes: bytes) -> list[float]:
     """
     Hitung embedding vector (768 dim, L2-normalized) dari image bytes.
+    Pipeline v2: bg removal → resize-with-pad → DINOv2.
     L2 normalize → cosine distance = euclidean distance² / 2.
     """
     if not _TORCH_AVAILABLE:
@@ -199,13 +333,46 @@ def compute_embedding(image_bytes: bytes) -> list[float]:
 
     model, preprocess = _load_model()
 
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor = preprocess(img).unsqueeze(0)   # [1, 3, H, W]
+    pil = _prepare_pil(image_bytes)
+    tensor = preprocess(pil).unsqueeze(0)   # [1, 3, 224, 224]
 
     with torch.no_grad():
         feat = model(tensor)                # [1, 768] — DINOv2 CLS token
         feat = nn.functional.normalize(feat, p=2, dim=1)
         vec  = feat.squeeze(0).cpu().tolist()
+
+    return vec
+
+
+def compute_query_embedding(image_bytes: bytes) -> list[float]:
+    """
+    Query-side embedding dengan TTA — averaging 4 augmentasi (original,
+    horizontal flip, zoom in, zoom out) untuk robust ke pose/orientasi
+    foto user.
+
+    Foto query cuma 1 → biaya 4× forward pass DINOv2 (~1 detik tambahan
+    di CPU) bisa diterima. Untuk indexing pakai compute_embeddings_batch
+    yang TIDAK TTA (lebih banyak foto, biaya 4× tidak sepadan).
+    """
+    if not ENABLE_QUERY_TTA:
+        return compute_embedding(image_bytes)
+
+    if not _TORCH_AVAILABLE:
+        raise RuntimeError(f"torch tidak tersedia: {_TORCH_ERR}")
+
+    model, preprocess = _load_model()
+
+    pil      = _prepare_pil(image_bytes)
+    variants = _build_tta_variants(pil)
+    batch    = torch.stack([preprocess(v) for v in variants])  # [N, 3, 224, 224]
+
+    with torch.no_grad():
+        feats = model(batch)                                   # [N, 768]
+        feats = nn.functional.normalize(feats, p=2, dim=1)
+        # Average di unit-sphere → re-normalize ke unit length.
+        mean  = feats.mean(dim=0, keepdim=True)
+        mean  = nn.functional.normalize(mean, p=2, dim=1)
+        vec   = mean.squeeze(0).cpu().tolist()
 
     return vec
 
@@ -228,15 +395,16 @@ def compute_embeddings_batch(image_bytes_list: list[bytes]) -> list[Optional[lis
     model, preprocess = _load_model()
 
     # ── Step 1: decode & preprocess (sequential, fast) ──
+    # Pipeline v2: bg removal → resize-with-pad → ToTensor + Normalize.
     tensors:  list = []
     valid_ix: list[int] = []
     for i, b in enumerate(image_bytes_list):
         try:
-            img = Image.open(io.BytesIO(b)).convert("RGB")
-            tensors.append(preprocess(img))
+            pil = _prepare_pil(b)
+            tensors.append(preprocess(pil))
             valid_ix.append(i)
         except Exception as e:
-            print(f"[image_search] decode error #{i}: {e}")
+            print(f"[image_search] decode/preprocess error #{i}: {e}")
 
     out: list = [None] * len(image_bytes_list)
     if not tensors:
@@ -717,9 +885,11 @@ def index_part_number(pn: str, indexed_by: str = "admin",
 
 
 def index_bulk(pn_list: list[str], indexed_by: str = "admin",
-               progress_callback=None) -> list[dict]:
+               progress_callback=None, force_reindex: bool = False) -> list[dict]:
     """
     Index banyak PN sekaligus. progress_callback(i, total, pn, result) — opsional.
+    force_reindex=True → re-embed semua foto walau sudah ada di DB
+    (dipakai saat upgrade pipeline preprocessing).
     Return list of dict (1 per PN).
     """
     pn_clean = [p.strip().upper() for p in pn_list if p and p.strip()]
@@ -728,7 +898,8 @@ def index_bulk(pn_list: list[str], indexed_by: str = "admin",
     results = []
     total   = len(pn_clean)
     for i, pn in enumerate(pn_clean, start=1):
-        r = index_part_number(pn, indexed_by=indexed_by)
+        r = index_part_number(pn, indexed_by=indexed_by,
+                              force_reindex=force_reindex)
         results.append(r)
         if progress_callback:
             try:
@@ -785,9 +956,9 @@ def search_by_image(image_bytes: bytes,
         return []
 
     try:
-        query_vec = compute_embedding(image_bytes)
+        query_vec = compute_query_embedding(image_bytes)
     except Exception as e:
-        print(f"[image_search] compute_embedding error: {e}")
+        print(f"[image_search] compute_query_embedding error: {e}")
         return []
 
     # threshold similarity 0.70  →  cosine distance < 0.30
