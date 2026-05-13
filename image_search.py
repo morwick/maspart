@@ -1560,6 +1560,39 @@ def _render_card_grid(items: list[dict], start_rank: int = 1,
     if not items:
         return
 
+    # ── Inject CSS lightbox (fullscreen modal) sekali per grid call ──
+    # CSS-only via :target pseudo-class — no JS needed, no Streamlit rerun.
+    st.markdown(
+        """
+        <style>
+        .fs-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);
+                  z-index:99999;align-items:center;justify-content:center;
+                  padding:24px;box-sizing:border-box;}
+        .fs-modal:target{display:flex;}
+        .fs-modal img{max-width:96vw;max-height:92vh;object-fit:contain;
+                      box-shadow:0 8px 32px rgba(0,0,0,0.5);border-radius:6px;
+                      background:#fff;}
+        .fs-modal .fs-close{position:absolute;top:18px;right:24px;color:#fff;
+                            text-decoration:none;font-size:32px;font-weight:300;
+                            line-height:1;width:44px;height:44px;display:flex;
+                            align-items:center;justify-content:center;
+                            background:rgba(255,255,255,0.12);border-radius:50%;
+                            transition:background .15s;}
+        .fs-modal .fs-close:hover{background:rgba(255,255,255,0.25);}
+        .fs-modal .fs-backdrop{position:absolute;inset:0;cursor:zoom-out;}
+        .fs-trigger{position:absolute;top:6px;right:6px;width:30px;height:30px;
+                    background:rgba(255,255,255,0.92);border:1px solid #e5e7eb;
+                    border-radius:6px;display:flex;align-items:center;
+                    justify-content:center;text-decoration:none;color:#374151;
+                    cursor:zoom-in;z-index:2;opacity:0;transition:opacity .15s;
+                    box-shadow:0 1px 3px rgba(0,0,0,0.08);}
+        .fs-imgbox:hover .fs-trigger{opacity:1;}
+        .fs-trigger:hover{background:#fff;color:#111827;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # ── Step 1: prefetch paralel semua foto sebelum render apapun ──
     urls = [r["sims_url"] for r in items if r.get("sims_url")]
     if urls:
@@ -1654,9 +1687,11 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
 
     # Ambil foto + encode base64 — pakai background-image (lebih reliable
     # upscale dibanding object-fit:contain di Streamlit context)
-    img_bg_style    = ""
-    img_inner_html  = ""
-    has_img         = False
+    img_bg_style     = ""
+    img_inner_html   = ""
+    fs_trigger_html  = ""
+    fs_modal_html    = ""
+    has_img          = False
     if sims_url:
         img_bytes = _download_image(sims_url)
         if img_bytes:
@@ -1676,6 +1711,32 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
                 "background-repeat:no-repeat;"
             )
             has_img = True
+            # Unique modal id per card (rank + sanitized PN)
+            pn_safe = re.sub(r"[^A-Za-z0-9]", "", pn)
+            fs_id   = f"fs-{rank}-{pn_safe}"
+            data_uri = f"data:{mime};base64,{b64}"
+            # Tombol trigger di pojok kanan-atas foto (muncul saat hover)
+            fs_trigger_html = (
+                f'<a href="#{fs_id}" class="fs-trigger" title="Fullscreen" '
+                f'aria-label="Lihat fullscreen">'
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" '
+                f'viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+                f'<polyline points="15 3 21 3 21 9"></polyline>'
+                f'<polyline points="9 21 3 21 3 15"></polyline>'
+                f'<line x1="21" y1="3" x2="14" y2="10"></line>'
+                f'<line x1="3" y1="21" x2="10" y2="14"></line>'
+                f'</svg></a>'
+            )
+            # Modal overlay (CSS-only via :target). Klik backdrop / tombol ✕
+            # → href="#" tutup modal tanpa rerun Streamlit.
+            fs_modal_html = (
+                f'<div id="{fs_id}" class="fs-modal">'
+                f'<a href="#" class="fs-backdrop" aria-label="Tutup"></a>'
+                f'<a href="#" class="fs-close" aria-label="Tutup">&times;</a>'
+                f'<img src="{data_uri}" alt="{pn}" />'
+                f'</div>'
+            )
 
     if not has_img:
         img_inner_html = (
@@ -1709,12 +1770,14 @@ def _render_result_card(rank: int, r: dict, is_best: bool = False,
         f'title="{part_name}">'
         f'{part_name}'
         f'</div>'
-        f'<div style="height:{img_h}px;background:#fff;border-radius:8px;'
-        f'border:1px solid #f3f4f6;overflow:hidden;'
-        f'{img_bg_style}{flex_center}">'
+        f'<div class="fs-imgbox" style="position:relative;height:{img_h}px;'
+        f'background:#fff;border-radius:8px;border:1px solid #f3f4f6;'
+        f'overflow:hidden;{img_bg_style}{flex_center}">'
+        f'{fs_trigger_html}'
         f'{img_inner_html}'
         f'</div>'
         f'</div>'
+        f'{fs_modal_html}'
     )
     st.markdown(card_html, unsafe_allow_html=True)
 
