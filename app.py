@@ -3310,19 +3310,9 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 """)
 
         # ── Trigger search dari Image Search ─────────────────────────
-        # Image Search tab set _trigger_search_pn → kita jalankan
-        # search_part_number di sini supaya hasilnya tampil di bawah tabs.
-        _trigger_pn = st.session_state.pop("_trigger_search_pn", None)
-        if _trigger_pn:
-            try:
-                st.session_state.search_results = search_part_number(
-                    _trigger_pn, st.session_state.excel_files,
-                    self.stok_cache, self.harga_lookup
-                )
-                st.session_state.search_type = "Part Number"
-                st.session_state.search_term = _trigger_pn
-            except Exception as _e:
-                st.warning(f"⚠️ Gagal menjalankan search dari image: {_e}")
+        # Trigger di-handle di dalam render_search_image_tab() sendiri agar
+        # spinner muncul di lokasi user (bawah hasil image search), bukan
+        # di atas tabs yang tidak terlihat saat scroll.
 
         # ── TABS ────────────────────────────────────────────────────
         st.markdown(TAB_PERSIST_JS, unsafe_allow_html=True)

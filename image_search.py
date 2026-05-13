@@ -1170,6 +1170,28 @@ _SS_QUERY_NAME    = "_img_search_query_name"
 _SS_RESULTS       = "_img_search_results"
 
 
+def _clear_global_pn_results() -> None:
+    """
+    Hapus state hasil pencarian PN global (tabel "Hasil Pencarian (N ditemukan)"
+    + section "Gambar Part") yang dirender oleh display_search_results() di
+    app.py — biar tidak ikut menggantung saat user mulai pencarian gambar baru.
+    """
+    for k in ("search_results", "search_type", "search_term"):
+        st.session_state.pop(k, None)
+
+
+def _on_query_file_change() -> None:
+    """
+    Callback file_uploader — dipanggil HANYA saat user benar-benar ganti
+    foto (atau remove). TIDAK dipanggil saat rerun biasa (mis. klik tombol
+    Detail PN), jadi aman untuk clearing state lama di sini.
+    """
+    st.session_state.pop(_SS_QUERY_BYTES, None)
+    st.session_state.pop(_SS_QUERY_NAME,  None)
+    st.session_state.pop(_SS_RESULTS,     None)
+    _clear_global_pn_results()
+
+
 def _try_get_part_name(pn: str) -> str:
     """Best-effort: ambil part name dari session excel_files cache."""
     try:
@@ -1303,6 +1325,7 @@ def render_search_image_tab():
                 type=["jpg", "jpeg", "png", "webp"],
                 key="img_search_uploader",
                 help="Format didukung: JPG, JPEG, PNG, WEBP. Max 200 MB.",
+                on_change=_on_query_file_change,
             )
 
             if uploaded is not None:
@@ -1337,6 +1360,7 @@ def render_search_image_tab():
                     st.session_state.pop(_SS_QUERY_BYTES, None)
                     st.session_state.pop(_SS_QUERY_NAME,  None)
                     st.session_state.pop(_SS_RESULTS,     None)
+                    _clear_global_pn_results()
                     st.rerun()
 
             # Advanced settings (collapsed default)
@@ -1404,6 +1428,9 @@ def render_search_image_tab():
 
     # ── Eksekusi search ──
     if do_search and q_bytes:
+        # Bersihkan hasil PN search lama (tabel di bawah tabs) supaya tidak
+        # menggantung saat user run image search baru.
+        _clear_global_pn_results()
         with st.spinner("🔍 Menghitung embedding & mencari di database..."):
             t0 = time.time()
             # Ambil kandidat mentah tanpa threshold — biar smart filter
@@ -1426,6 +1453,30 @@ def render_search_image_tab():
         st.session_state["_img_search_ambiguous_count"] = filtered["ambiguous_count"]
         st.session_state["_img_search_elapsed"]        = elapsed
         st.rerun()
+
+    # ── Handle "Detail PN" trigger dari klik tombol di card ──────────────
+    # Spinner muncul di lokasi yang sama dengan spinner "Cari Part Sekarang"
+    # (antara upload box dan section hasil) supaya user langsung lihat
+    # tanda loading tanpa harus scroll.
+    trigger_pn = st.session_state.pop("_trigger_search_pn", None)
+    if trigger_pn:
+        try:
+            from app import search_part_number  # late import — hindari circular
+        except ImportError:
+            search_part_number = None
+        if search_part_number is not None:
+            with st.spinner(f"🔍 Mencari detail untuk {trigger_pn}..."):
+                try:
+                    st.session_state.search_results = search_part_number(
+                        trigger_pn,
+                        st.session_state.get("excel_files", []),
+                        st.session_state.get("stok_data"),
+                        st.session_state.get("harga_lookup", {}),
+                    )
+                    st.session_state.search_type = "Part Number"
+                    st.session_state.search_term = trigger_pn
+                except Exception as _e:
+                    st.warning(f"⚠️ Gagal menjalankan search dari image: {_e}")
 
     # ── Tampilkan hasil ──
     results = st.session_state.get(_SS_RESULTS)

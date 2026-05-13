@@ -42,6 +42,9 @@ _SS_BULK_RESULTS  = "_img_idx_bulk_results"
 _SS_BULK_RUNNING  = "_img_idx_bulk_running"
 _SS_DELETE_RESULT = "_img_idx_delete_result"
 _SS_LIST_QUERY    = "_img_idx_list_query"
+_SS_LIST_PAGE     = "_img_idx_list_page"
+
+_PAGE_SIZE = 20
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -443,6 +446,20 @@ def _render_bulk_summary(payload: dict):
 #  MODE 3 — DAFTAR PN TER-INDEX
 # ══════════════════════════════════════════════════════════════════════════
 
+def _reset_list_page():
+    """Reset pagination ke halaman 1 — dipanggil saat filter query berubah."""
+    st.session_state[_SS_LIST_PAGE] = 1
+    st.session_state["img_idx_pg_jump"] = 1
+
+
+def _on_jump_page_change():
+    """Sync nilai widget jump ke _SS_LIST_PAGE saat user ubah angka."""
+    try:
+        st.session_state[_SS_LIST_PAGE] = int(st.session_state["img_idx_pg_jump"])
+    except (ValueError, TypeError):
+        pass
+
+
 def _render_indexed_list():
     """Tampilkan daftar PN yang sudah di-index + tombol hapus."""
     st.markdown("#### Daftar Part Number Ter-index")
@@ -463,6 +480,7 @@ def _render_indexed_list():
             placeholder="Ketik untuk filter…",
             key=_SS_LIST_QUERY,
             label_visibility="collapsed",
+            on_change=_reset_list_page,
         )
     with col_btn:
         if st.button("🔄 Refresh", use_container_width=True,
@@ -470,7 +488,7 @@ def _render_indexed_list():
             st.rerun()
 
     with st.spinner("Memuat daftar..."):
-        rows = list_indexed_pns(query=query, limit=200)
+        rows = list_indexed_pns(query=query, limit=500)
 
     if not rows:
         if query:
@@ -482,7 +500,19 @@ def _render_indexed_list():
             )
         return
 
-    st.caption(f"Menampilkan **{len(rows)}** PN (urutan: terbaru ke lama)")
+    # ── Pagination ────────────────────────────────────────────────────────
+    total      = len(rows)
+    n_pages    = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    cur_page   = int(st.session_state.get(_SS_LIST_PAGE, 1) or 1)
+    cur_page   = max(1, min(cur_page, n_pages))
+    start_idx  = (cur_page - 1) * _PAGE_SIZE
+    end_idx    = min(start_idx + _PAGE_SIZE, total)
+    page_rows  = rows[start_idx:end_idx]
+
+    st.caption(
+        f"Menampilkan **{start_idx + 1}–{end_idx}** dari **{total}** PN "
+        f"(urutan: terbaru ke lama) · Halaman **{cur_page}/{n_pages}**"
+    )
 
     # Header row
     h1, h2, h3, h4, h5 = st.columns([3, 1, 2, 2, 1])
@@ -495,7 +525,7 @@ def _render_indexed_list():
                 unsafe_allow_html=True)
 
     # Rows
-    for r in rows:
+    for r in page_rows:
         pn          = r["part_number"]
         n_photos    = r["n_photos"]
         indexed_by  = r["indexed_by"] or "—"
@@ -510,6 +540,50 @@ def _render_indexed_list():
             if st.button("🗑️", key=f"img_idx_del_{pn}",
                          help=f"Hapus {pn} dari index"):
                 _do_delete(pn)
+
+    # ── Pagination controls (di bawah list) ───────────────────────────────
+    if n_pages > 1:
+        st.markdown(
+            "<hr style='margin:8px 0; border:none; border-top:1px solid #e5e7eb;'/>",
+            unsafe_allow_html=True,
+        )
+        cp1, cp2, cp3, cp4, cp5 = st.columns([1, 1, 2, 1, 1])
+        with cp1:
+            if st.button("⏮️ Awal", use_container_width=True,
+                         disabled=(cur_page <= 1),
+                         key="img_idx_pg_first"):
+                st.session_state[_SS_LIST_PAGE] = 1
+                st.rerun()
+        with cp2:
+            if st.button("◀️ Prev", use_container_width=True,
+                         disabled=(cur_page <= 1),
+                         key="img_idx_pg_prev"):
+                st.session_state[_SS_LIST_PAGE] = cur_page - 1
+                st.rerun()
+        with cp3:
+            # Sync widget ke cur_page — handles update dari tombol prev/next/awal/akhir.
+            # Harus di-set SEBELUM widget render. on_change callback hanya fire saat
+            # user manual ubah, jadi tidak konflik dengan sync ini.
+            st.session_state["img_idx_pg_jump"] = cur_page
+            st.number_input(
+                "Lompat ke halaman",
+                min_value=1, max_value=n_pages, step=1,
+                key="img_idx_pg_jump",
+                label_visibility="collapsed",
+                on_change=_on_jump_page_change,
+            )
+        with cp4:
+            if st.button("Next ▶️", use_container_width=True,
+                         disabled=(cur_page >= n_pages),
+                         key="img_idx_pg_next"):
+                st.session_state[_SS_LIST_PAGE] = cur_page + 1
+                st.rerun()
+        with cp5:
+            if st.button("Akhir ⏭️", use_container_width=True,
+                         disabled=(cur_page >= n_pages),
+                         key="img_idx_pg_last"):
+                st.session_state[_SS_LIST_PAGE] = n_pages
+                st.rerun()
 
 
 def _do_delete(pn: str):
