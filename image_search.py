@@ -51,7 +51,7 @@ try:
     import torch
     from torch import nn
     from torchvision import transforms
-    from PIL import Image
+    from PIL import Image, ImageOps
     _TORCH_AVAILABLE = True
     _TORCH_ERR = None
 except Exception as e:
@@ -199,13 +199,47 @@ def compute_embedding(image_bytes: bytes) -> list[float]:
 
     model, preprocess = _load_model()
 
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = Image.open(io.BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img).convert("RGB")
     tensor = preprocess(img).unsqueeze(0)   # [1, 3, H, W]
 
     with torch.no_grad():
         feat = model(tensor)                # [1, 768] — DINOv2 CLS token
         feat = nn.functional.normalize(feat, p=2, dim=1)
+        if not torch.isfinite(feat).all():
+            raise ValueError("embedding non-finite (NaN/Inf)")
         vec  = feat.squeeze(0).cpu().tolist()
+
+    return vec
+
+
+def compute_embedding_tta(image_bytes: bytes) -> list[float]:
+    """
+    Test-time augmentation: hitung embedding rata-rata dari foto asli +
+    horizontal-flip, lalu re-normalize. Untuk part yang relatif simetris,
+    TTA flip biasanya menambah 1–3% recall tanpa ubah index.
+
+    Latency ≈ 2× compute_embedding (dua forward pass).
+    """
+    if not _TORCH_AVAILABLE:
+        raise RuntimeError(f"torch tidak tersedia: {_TORCH_ERR}")
+
+    model, preprocess = _load_model()
+
+    img = Image.open(io.BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    img_flipped = ImageOps.mirror(img)
+
+    tensor = torch.stack([preprocess(img), preprocess(img_flipped)])  # [2, 3, H, W]
+
+    with torch.no_grad():
+        feats = model(tensor)                           # [2, 768]
+        feats = nn.functional.normalize(feats, p=2, dim=1)
+        mean  = feats.mean(dim=0, keepdim=True)         # [1, 768]
+        mean  = nn.functional.normalize(mean, p=2, dim=1)
+        if not torch.isfinite(mean).all():
+            raise ValueError("embedding non-finite (NaN/Inf)")
+        vec   = mean.squeeze(0).cpu().tolist()
 
     return vec
 
@@ -232,7 +266,8 @@ def compute_embeddings_batch(image_bytes_list: list[bytes]) -> list[Optional[lis
     valid_ix: list[int] = []
     for i, b in enumerate(image_bytes_list):
         try:
-            img = Image.open(io.BytesIO(b)).convert("RGB")
+            img = Image.open(io.BytesIO(b))
+            img = ImageOps.exif_transpose(img).convert("RGB")
             tensors.append(preprocess(img))
             valid_ix.append(i)
         except Exception as e:
@@ -253,8 +288,14 @@ def compute_embeddings_batch(image_bytes_list: list[bytes]) -> list[Optional[lis
             all_feats.append(feat.cpu())
 
     feats_cat = torch.cat(all_feats, dim=0)               # [N, 768]
+    # Skip embedding non-finite (NaN/Inf) — kalau diteruskan ke pgvector
+    # akan menyebabkan distance NaN dan ranking jadi rusak.
+    finite_mask = torch.isfinite(feats_cat).all(dim=1)
     for j, src_ix in enumerate(valid_ix):
-        out[src_ix] = feats_cat[j].tolist()
+        if bool(finite_mask[j]):
+            out[src_ix] = feats_cat[j].tolist()
+        else:
+            print(f"[image_search] non-finite embedding #{src_ix} — skip")
 
     return out
 
@@ -752,12 +793,13 @@ _AGG_BOOST_CAP       = 0.10   # boost maksimum +10%
 
 def search_by_image(image_bytes: bytes,
                     top_k: int = DEFAULT_TOP_K,
-                    threshold: float = DEFAULT_THRESHOLD) -> list[dict]:
+                    threshold: float = DEFAULT_THRESHOLD,
+                    use_tta: bool = False) -> list[dict]:
     """
     Cari part berdasarkan foto query — DENGAN PN-level aggregate scoring.
 
     Flow:
-      1. Compute embedding query
+      1. Compute embedding query (opsional pakai TTA flip)
       2. Fetch top_k × 5 foto kandidat dari DB (over-fetch)
       3. Group per PN, ambil foto similarity tertinggi sebagai representative
       4. Hitung confidence boost: PN dengan banyak foto strong match dapat bonus
@@ -768,6 +810,8 @@ def search_by_image(image_bytes: bytes,
         image_bytes  — foto query (jpg/png/webp bytes)
         top_k        — jumlah PN unik max yang di-return
         threshold    — aggregated similarity minimum (0.0–1.0)
+        use_tta      — kalau True, hitung embedding rata-rata foto + flip
+                       (lebih akurat 1–3%, latency 2× embed)
 
     Return list of dict (urut similarity desc, 1 entry per PN):
       [{
@@ -785,7 +829,10 @@ def search_by_image(image_bytes: bytes,
         return []
 
     try:
-        query_vec = compute_embedding(image_bytes)
+        if use_tta:
+            query_vec = compute_embedding_tta(image_bytes)
+        else:
+            query_vec = compute_embedding(image_bytes)
     except Exception as e:
         print(f"[image_search] compute_embedding error: {e}")
         return []
@@ -859,6 +906,10 @@ def search_by_image(image_bytes: bytes,
 
     aggregated.sort(key=lambda x: x["similarity"], reverse=True)
 
+    # Diagnostic: top-5 aggregated similarity untuk tuning threshold di kemudian hari.
+    top5 = [round(a["similarity"], 3) for a in aggregated[:5]]
+    print(f"[image_search] top5 sims = {top5} (tta={use_tta}, n_candidates={len(aggregated)})")
+
     if threshold > 0:
         aggregated = [a for a in aggregated if a["similarity"] >= threshold]
 
@@ -907,7 +958,8 @@ def smart_filter_results(results: list[dict]) -> dict:
     """
     if not results:
         return {"kept": [], "dropped": [], "reason": "tidak ada hasil",
-                "mode": "none", "top_sim": 0.0}
+                "mode": "none", "top_sim": 0.0,
+                "ambiguous": False, "ambiguous_count": 0}
 
     sorted_r = sorted(results, key=lambda x: x.get("similarity", 0.0), reverse=True)
     top_sim  = sorted_r[0]["similarity"]
@@ -915,11 +967,13 @@ def smart_filter_results(results: list[dict]) -> dict:
     # Top hit terlalu lemah → tidak ada match yang meyakinkan
     if top_sim < _SMART_ABS_FLOOR:
         return {
-            "kept":    [],
-            "dropped": sorted_r,
-            "reason":  f"similarity tertinggi hanya {top_sim*100:.1f}% — tidak ada match meyakinkan",
-            "mode":    "none",
-            "top_sim": top_sim,
+            "kept":            [],
+            "dropped":         sorted_r,
+            "reason":          f"similarity tertinggi hanya {top_sim*100:.1f}% — tidak ada match meyakinkan",
+            "mode":            "none",
+            "top_sim":         top_sim,
+            "ambiguous":       False,
+            "ambiguous_count": 0,
         }
 
     kept:    list[dict] = [sorted_r[0]]
@@ -1131,6 +1185,36 @@ def _try_get_part_name(pn: str) -> str:
     return ""
 
 
+# Validasi minimum untuk foto query — cegah garbage masuk ke embedding.
+_QUERY_MIN_SIDE_PX = 200
+_QUERY_MIN_BYTES   = 5 * 1024
+_QUERY_OK_FORMATS  = {"JPEG", "PNG", "WEBP"}
+
+
+def _validate_query_image(raw: bytes, name: str = "") -> tuple[bool, str]:
+    """
+    Sanity check foto query sebelum embed. Return (ok, error_msg).
+    Tolak foto kekecilan/korup karena bicubic upscale dari 50px jadi 224px
+    menghasilkan embedding generik → hasil pencarian ngawur.
+    """
+    if not raw or len(raw) < _QUERY_MIN_BYTES:
+        return False, f"File terlalu kecil ({len(raw)/1024:.1f} KB) — minimum 5 KB."
+    try:
+        img = Image.open(io.BytesIO(raw))
+        fmt = (img.format or "").upper()
+        w, h = img.size
+    except Exception as e:
+        return False, f"File tidak bisa dibaca sebagai gambar ({e})."
+    if fmt not in _QUERY_OK_FORMATS:
+        return False, f"Format {fmt or 'tidak dikenali'} tidak didukung — pakai JPG/PNG/WEBP."
+    if min(w, h) < _QUERY_MIN_SIDE_PX:
+        return False, (
+            f"Resolusi foto {w}×{h} px terlalu kecil — minimum sisi terpendek "
+            f"{_QUERY_MIN_SIDE_PX} px untuk hasil akurat."
+        )
+    return True, ""
+
+
 def render_search_image_tab():
     """Tab user: Cari Part by Foto."""
     # ── Header ringkas ─────────────────────────────────────────────────────
@@ -1222,8 +1306,16 @@ def render_search_image_tab():
             )
 
             if uploaded is not None:
-                st.session_state[_SS_QUERY_BYTES] = uploaded.read()
-                st.session_state[_SS_QUERY_NAME]  = uploaded.name
+                raw_bytes = uploaded.read()
+                ok, err   = _validate_query_image(raw_bytes, uploaded.name)
+                if not ok:
+                    st.error(f"❌ {err}")
+                    st.session_state.pop(_SS_QUERY_BYTES, None)
+                    st.session_state.pop(_SS_QUERY_NAME,  None)
+                    st.session_state.pop(_SS_RESULTS,     None)
+                else:
+                    st.session_state[_SS_QUERY_BYTES] = raw_bytes
+                    st.session_state[_SS_QUERY_NAME]  = uploaded.name
 
             q_bytes_check = st.session_state.get(_SS_QUERY_BYTES)
 
@@ -1257,6 +1349,15 @@ def render_search_image_tab():
                     help=(
                         "Setelah smart filter, dari N PN ini diambil yang paling relevan. "
                         "Lebih tinggi = lebih banyak kandidat dipertimbangkan."
+                    ),
+                )
+                use_tta = st.checkbox(
+                    "🔄 Augmentasi flip (lebih akurat, ~2× lebih lambat)",
+                    value=False,
+                    key="img_search_tta",
+                    help=(
+                        "Hitung embedding rata-rata dari foto asli + horizontal-flip. "
+                        "Cocok untuk part simetris kiri-kanan."
                     ),
                 )
                 st.caption(
@@ -1311,6 +1412,7 @@ def render_search_image_tab():
                 q_bytes,
                 top_k=int(top_k),
                 threshold=0.0,
+                use_tta=bool(use_tta),
             )
             filtered = smart_filter_results(raw)
             elapsed  = time.time() - t0
