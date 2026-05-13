@@ -94,6 +94,14 @@ CACHE_THUMB_MAX_PX  = 512    # resize max dimension saat save ke cache
 CACHE_THUMB_QUALITY = 85     # WebP quality
 _CACHE_CLEANUP_EVERY = 50    # cek cleanup tiap N write
 
+# Bulk hardening — supaya bulk PN banyak tidak gagal seluruhnya kalau ada hiccup
+BULK_UPSERT_CHUNK     = 50   # potong payload bulk upsert tiap N row (hindari body-too-large)
+BULK_HTTP_RETRIES     = 2    # retry Supabase REST kalau 5xx/timeout (max 3 attempt)
+BULK_RETRY_BASE_SLEEP = 1.0  # detik — backoff awal, di-double per attempt
+BULK_MAX_CONSEC_FAIL  = 10   # circuit-breaker: stop bulk kalau N PN beruntun fatal-error
+BULK_GC_EVERY         = 25   # paksa gc.collect() tiap N PN untuk lepas RAM
+BULK_INTER_PN_SLEEP   = 0.0  # detik — jeda antar PN (0 = no throttle; naikkan kalau API rate-limit)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  CONFIG HELPERS (sama pattern dengan admin_foto_part.py)
@@ -515,25 +523,42 @@ def _download_image(url: str, use_cache: bool = True) -> Optional[bytes]:
 
 
 def _fetch_indexed_urls_for_pn(pn: str) -> set[str]:
-    """Ambil daftar URL yang sudah ter-index di DB untuk PN ini."""
+    """
+    Ambil daftar URL yang sudah ter-index di DB untuk PN ini.
+    Retry pada transient HTTP error supaya hiccup jaringan tidak men-skip
+    foto yang sebenarnya sudah ter-index (kalau gagal total → return set kosong,
+    konsekuensinya hanya redownload SIMS, bukan corrupt data).
+    """
     if not _is_configured() or not pn:
         return set()
-    try:
-        resp = requests.get(
-            _rest_url(INDEX_TABLE),
-            headers={**_rest_headers(use_service=True), "Accept": "application/json"},
-            params={
-                "select":      "sims_url",
-                "part_number": f"eq.{pn.strip().upper()}",
-            },
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            return set()
-        return {r.get("sims_url", "") for r in (resp.json() or []) if r.get("sims_url")}
-    except Exception as e:
-        print(f"[image_search] fetch indexed urls error: {e}")
-        return set()
+
+    last_err = ""
+    for attempt in range(BULK_HTTP_RETRIES + 1):
+        try:
+            resp = requests.get(
+                _rest_url(INDEX_TABLE),
+                headers={**_rest_headers(use_service=True), "Accept": "application/json"},
+                params={
+                    "select":      "sims_url",
+                    "part_number": f"eq.{pn.strip().upper()}",
+                },
+                timeout=HTTP_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                return {r.get("sims_url", "") for r in (resp.json() or []) if r.get("sims_url")}
+            last_err = f"HTTP {resp.status_code}"
+            if resp.status_code not in _TRANSIENT_HTTP:
+                break
+        except Exception as e:
+            last_err = f"err: {e}"
+            if not _is_transient_exception(e):
+                break
+
+        if attempt < BULK_HTTP_RETRIES:
+            _retry_sleep(attempt + 1)
+
+    print(f"[image_search] fetch indexed urls fail ({pn}): {last_err}")
+    return set()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -546,6 +571,25 @@ def _vec_to_str(vec: list[float]) -> str:
     PostgREST tidak otomatis cast JSON array → vector, harus string.
     """
     return "[" + ",".join(f"{x:.7g}" for x in vec) + "]"
+
+
+# Status code yang dianggap transient — boleh retry dengan backoff.
+# 408 request timeout, 425 too early, 429 rate-limit, 5xx server-side.
+_TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504, 522, 524}
+
+
+def _is_transient_exception(exc: Exception) -> bool:
+    """True kalau exception dari requests yang layak di-retry (network hiccup)."""
+    return isinstance(exc, (
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ChunkedEncodingError,
+    ))
+
+
+def _retry_sleep(attempt: int) -> None:
+    """Backoff exponential: 1s, 2s, 4s, ..."""
+    time.sleep(BULK_RETRY_BASE_SLEEP * (2 ** max(0, attempt - 1)))
 
 
 def _upsert_embedding(pn: str, sims_url: str, embedding: list[float],
@@ -583,10 +627,11 @@ def _upsert_embedding(pn: str, sims_url: str, embedding: list[float],
 
 def _upsert_embeddings_bulk(rows: list[dict]) -> tuple[int, str]:
     """
-    Bulk upsert N baris ke part_image_index dalam 1 request.
+    Bulk upsert N baris ke part_image_index — di-chunk supaya body tidak
+    kelewat besar, dan tiap chunk di-retry kalau kena error transient.
+
     rows: [{"part_number": ..., "sims_url": ..., "embedding": [...], "indexed_by": ...}, ...]
-    Return: (n_ok, error_message). n_ok = jumlah baris yang berhasil
-    (PostgREST tidak return per-row status, jadi all-or-nothing).
+    Return: (n_ok, error_message). n_ok = jumlah baris yang berhasil di seluruh chunk.
     """
     if not rows:
         return 0, ""
@@ -598,26 +643,48 @@ def _upsert_embeddings_bulk(rows: list[dict]) -> tuple[int, str]:
         "indexed_by":  r.get("indexed_by") or "admin",
     } for r in rows]
 
-    try:
-        resp = requests.post(
-            _rest_url(INDEX_TABLE),
-            headers={
-                **_rest_headers(use_service=True),
-                "Prefer": "resolution=merge-duplicates,return=minimal",
-            },
-            params={"on_conflict": "part_number,sims_url"},
-            json=payload,
-            timeout=HTTP_TIMEOUT * 2,
-        )
-        if resp.status_code in (200, 201, 204):
-            return len(rows), ""
-        err = f"HTTP {resp.status_code}: {resp.text[:200]}"
-        print(f"[image_search] bulk upsert fail — {err}")
-        return 0, err
-    except Exception as e:
-        err = f"exception: {e}"
-        print(f"[image_search] bulk upsert error: {err}")
-        return 0, err
+    chunk_size = max(1, int(BULK_UPSERT_CHUNK))
+    n_ok       = 0
+    errors: list[str] = []
+
+    for start in range(0, len(payload), chunk_size):
+        chunk = payload[start:start + chunk_size]
+
+        last_err = ""
+        for attempt in range(BULK_HTTP_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    _rest_url(INDEX_TABLE),
+                    headers={
+                        **_rest_headers(use_service=True),
+                        "Prefer": "resolution=merge-duplicates,return=minimal",
+                    },
+                    params={"on_conflict": "part_number,sims_url"},
+                    json=chunk,
+                    timeout=HTTP_TIMEOUT * 2,
+                )
+                if resp.status_code in (200, 201, 204):
+                    n_ok += len(chunk)
+                    last_err = ""
+                    break
+                last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                # Hanya retry kalau status code transient (5xx, 429, dll).
+                if resp.status_code not in _TRANSIENT_HTTP:
+                    break
+            except Exception as e:
+                last_err = f"exception: {e}"
+                if not _is_transient_exception(e):
+                    break
+
+            if attempt < BULK_HTTP_RETRIES:
+                _retry_sleep(attempt + 1)
+
+        if last_err:
+            errors.append(f"chunk {start}-{start + len(chunk)}: {last_err}")
+            print(f"[image_search] bulk upsert fail — {errors[-1]}")
+
+    err_msg = " | ".join(errors[:3]) if errors else ""
+    return n_ok, err_msg
 
 
 def index_part_number(pn: str, indexed_by: str = "admin",
@@ -723,9 +790,17 @@ def index_part_number(pn: str, indexed_by: str = "admin",
     ordered_bytes  = [bytes_map[u] for u in ordered_urls]
     try:
         embeddings = compute_embeddings_batch(ordered_bytes)
+    except MemoryError as e:
+        result["error"] = f"OOM saat embed ({len(ordered_bytes)} foto): {e}"
+        return result
     except Exception as e:
         result["error"] = f"Batch embed error: {e}"
         return result
+    finally:
+        # Foto bytes sudah ter-encode ke tensor di langkah embedding —
+        # lepas ref-nya supaya RAM bebas sebelum tahap upsert (penting di Cloud).
+        bytes_map.clear()
+        del ordered_bytes
 
     # ── Step C: rakit row untuk bulk upsert ──
     rows_to_upsert: list[dict] = []
@@ -758,24 +833,109 @@ def index_part_number(pn: str, indexed_by: str = "admin",
 
 
 def index_bulk(pn_list: list[str], indexed_by: str = "admin",
-               progress_callback=None) -> list[dict]:
+               progress_callback=None, stop_event=None) -> list[dict]:
     """
-    Index banyak PN sekaligus. progress_callback(i, total, pn, result) — opsional.
-    Return list of dict (1 per PN).
+    Index banyak PN sekaligus dengan defensive handling supaya 1 PN gagal
+    tidak menjatuhkan seluruh batch.
+
+    Args:
+        pn_list           — daftar PN (akan di-dedupe + uppercased)
+        indexed_by        — username admin yang trigger
+        progress_callback — fn(i, total, pn, result) dipanggil tiap PN selesai
+        stop_event        — threading.Event opsional. Kalau is_set() → loop berhenti
+                            dan PN sisa di-tandai sebagai dibatalkan.
+
+    Hardening:
+      - Tiap PN dibungkus try/except: exception apa pun jadi result dict
+        gagal, bukan crash loop.
+      - Circuit-breaker: kalau ada BULK_MAX_CONSEC_FAIL PN fatal-error
+        beruntun → stop bulk (mencegah hammering API yang lagi down).
+      - gc.collect() periodik untuk lepas RAM (penting di Streamlit Cloud).
+      - Throttling antar-PN opsional (BULK_INTER_PN_SLEEP).
+
+    Return list of dict (1 per PN). PN yang dibatalkan / kena circuit-breaker
+    tetap di-list dengan flag ok=False + error penjelas.
     """
+    import gc
+
     pn_clean = [p.strip().upper() for p in pn_list if p and p.strip()]
     pn_clean = list(dict.fromkeys(pn_clean))   # dedupe, preserve order
 
-    results = []
-    total   = len(pn_clean)
+    results: list[dict] = []
+    total          = len(pn_clean)
+    consec_fail    = 0
+    aborted        = False
+    abort_reason   = ""
+
     for i, pn in enumerate(pn_clean, start=1):
-        r = index_part_number(pn, indexed_by=indexed_by)
+        # ── Cancel check sebelum mulai PN baru ──
+        if stop_event is not None and stop_event.is_set():
+            aborted, abort_reason = True, "dibatalkan oleh user"
+            r = {"ok": False, "pn": pn, "n_photos": 0, "n_indexed": 0,
+                 "n_skipped": 0, "error": abort_reason, "cancelled": True}
+            results.append(r)
+            if progress_callback:
+                try: progress_callback(i, total, pn, r)
+                except Exception: pass
+            continue
+
+        # ── Circuit breaker ──
+        if consec_fail >= BULK_MAX_CONSEC_FAIL:
+            aborted = True
+            abort_reason = (
+                f"circuit-breaker: {consec_fail} PN beruntun fatal-error "
+                "(API mungkin down)"
+            )
+            r = {"ok": False, "pn": pn, "n_photos": 0, "n_indexed": 0,
+                 "n_skipped": 0, "error": abort_reason, "aborted": True}
+            results.append(r)
+            if progress_callback:
+                try: progress_callback(i, total, pn, r)
+                except Exception: pass
+            continue
+
+        # ── Eksekusi 1 PN, jangan biarkan exception lolos ──
+        try:
+            r = index_part_number(pn, indexed_by=indexed_by)
+        except MemoryError as e:
+            r = {"ok": False, "pn": pn, "n_photos": 0, "n_indexed": 0,
+                 "n_skipped": 0, "error": f"OOM: {e}"}
+            consec_fail += 1
+            # OOM → paksa gc untuk PN berikutnya
+            try: gc.collect()
+            except Exception: pass
+        except Exception as e:
+            r = {"ok": False, "pn": pn, "n_photos": 0, "n_indexed": 0,
+                 "n_skipped": 0, "error": f"exception tak terduga: {e}"}
+            consec_fail += 1
+        else:
+            # PN selesai normal. "fatal-error" = ok=False DAN ada foto SIMS
+            # (artinya proses indexing-nya yang gagal, bukan PN tanpa foto).
+            if (not r.get("ok")) and r.get("n_photos", 0) > 0:
+                consec_fail += 1
+            else:
+                consec_fail = 0
+
         results.append(r)
+
         if progress_callback:
             try:
                 progress_callback(i, total, pn, r)
             except Exception:
                 pass
+
+        # ── House-keeping: lepas RAM secara periodik ──
+        if BULK_GC_EVERY > 0 and i % BULK_GC_EVERY == 0:
+            try: gc.collect()
+            except Exception: pass
+
+        # ── Optional throttling antar PN ──
+        if BULK_INTER_PN_SLEEP > 0 and i < total:
+            time.sleep(BULK_INTER_PN_SLEEP)
+
+    if aborted:
+        print(f"[image_search] bulk aborted: {abort_reason}")
+
     return results
 
 
@@ -1514,8 +1674,6 @@ def render_search_image_tab():
         st.success(f"✅ **Match kuat** — top similarity **{top_sim*100:.1f}%**")
     elif filter_mode == "moderate":
         st.info(f"ℹ️ **Match sedang** — top similarity **{top_sim*100:.1f}%**")
-    elif filter_mode == "weak":
-        st.warning(f"⚠️ **Match lemah** — top similarity hanya **{top_sim*100:.1f}%** — pertimbangkan foto lebih jelas")
 
     if not results:
         if fallback:
@@ -1541,12 +1699,6 @@ def render_search_image_tab():
 
     if is_ambiguous:
         # ── Ambiguous mode: top-N sejajar, no BEST MATCH crown ────────────
-        gap_pct = _AMBIGUOUS_GAP * 100
-        st.warning(
-            f"🤔 **Kandidat ambigu** — **{ambig_count}** hasil punya similarity "
-            f"sangat berdekatan (gap < {gap_pct:.0f}%). Sistem tidak yakin mana "
-            f"yang paling tepat — silakan **verifikasi visual** untuk pilih yang benar."
-        )
         st.markdown(
             """
             <div style="margin:8px 0 6px 0; color:#92400e; font-size:12px;
