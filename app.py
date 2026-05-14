@@ -917,13 +917,84 @@ TAB_PERSIST_JS = """
 """
 
 st.markdown("""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    .stDeployButton {display: none !important;}
-    header[data-testid="stHeader"] {display: none !important;}
-    div[data-testid="stToolbar"] {display: none !important;}
+    /* ════════════════════════════════════════════════════════════════════
+       MasPart Design System — putih bersih + green #028912 sebagai brand.
+       Tokens disinkronkan dengan screens-shared.jsx pada handoff design.
+       ════════════════════════════════════════════════════════════════════ */
+    :root {
+        --mp-green:        #028912;
+        --mp-green-dark:   #026B0E;
+        --mp-green-soft:   #E6F5E8;
+        --mp-green-softer: #F1FAF2;
+        --mp-green-line:   #C7E8CC;
+        --mp-ink:          #0F1A12;
+        --mp-ink-70:       #3D4A40;
+        --mp-ink-50:       #6B7A6F;
+        --mp-ink-30:       #A6B0A8;
+        --mp-line:         #E5E7E3;
+        --mp-line-soft:    #EFF1ED;
+        --mp-bg:           #FFFFFF;
+        --mp-bg-muted:     #F7F8F5;
+        --mp-bg-canvas:    #FAFAF7;
+        --mp-amber:        #B5750B;
+        --mp-amber-soft:   #FEF6E3;
+        --mp-amber-line:   #F2D88B;
+        --mp-red:          #B42318;
+        --mp-red-soft:     #FEEAE7;
+        --mp-red-line:     #F4C8C2;
+        --mp-blue:         #1856B6;
+        --mp-blue-soft:    #E5EEFB;
+        --mp-radius:       10px;
+        --mp-radius-sm:    6px;
+        --mp-shadow-card:  0 1px 2px rgba(15,26,18,.04), 0 1px 3px rgba(15,26,18,.06);
+        --mp-shadow-pop:   0 6px 24px rgba(15,26,18,.10), 0 2px 6px rgba(15,26,18,.06);
+        --mp-font-sans:    'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        --mp-font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    html, body, [class*="css"] { font-family: var(--mp-font-sans); }
+    body { background: var(--mp-bg); color: var(--mp-ink); }
+
+    /* Sembunyikan chrome bawaan Streamlit */
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    .stDeployButton { display: none !important; }
+    header[data-testid="stHeader"] { display: none !important; height: 0 !important; }
+    div[data-testid="stToolbar"] { display: none !important; }
+    [data-testid="stDecoration"] { display: none !important; }
+    [data-testid="stStatusWidget"] { display: none !important; }
+    /* Hapus padding-top default Streamlit yang menyisakan area kosong di atas. */
+    .stApp > header { display: none !important; }
+    .stApp,
+    [data-testid="stApp"],
+    [data-testid="stAppViewContainer"] { padding-top: 0 !important; }
+    .main, section.main, [data-testid="stMain"] { padding-top: 0 !important; }
+    .main .block-container,
+    section.main .block-container,
+    [data-testid="stMain"] .block-container,
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stAppViewContainer"] .block-container {
+        padding-top: .75rem !important;
+        margin-top: 0 !important;
+    }
     .login-page [data-testid="stSidebar"] > div { display: none !important; }
+    iframe[height="0"] { display: none !important; }
+    /* Hide element-container yang isinya cuma iframe 0-height (mis. inject_keep_alive) */
+    .element-container:has(iframe[height="0"]),
+    [data-testid="stIFrame"]:has(iframe[height="0"]),
+    [data-testid="element-container"]:has(iframe[height="0"]) {
+        display: none !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    div[data-testid="stCustomComponentV1"][height="0"] { display: none !important; }
+
+    /* Tombol toggle sidebar custom — recolor ke brand green */
     #custom-sidebar-toggle {
         position: fixed !important;
         top: 10px !important;
@@ -931,29 +1002,361 @@ st.markdown("""
         z-index: 999999 !important;
         width: 36px !important;
         height: 36px !important;
-        background: #1E88E5 !important;
+        background: var(--mp-green) !important;
         color: white !important;
         border: none !important;
-        border-radius: 8px !important;
+        border-radius: var(--mp-radius-sm) !important;
         cursor: pointer !important;
         font-size: 18px !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
-        transition: background 0.2s !important;
+        box-shadow: 0 2px 8px rgba(2,137,18,.25) !important;
+        transition: background .2s !important;
     }
-    #custom-sidebar-toggle:hover { background: #1565C0 !important; }
-    .main-header { font-size: 2.5rem; color: #1E88E5; text-align: center; margin-bottom: 1.5rem; padding-top: 0.8rem; }
-    .sub-header { font-size: 1.5rem; color: #0D47A1; margin-top: 1.5rem; margin-bottom: 1rem; }
-    .search-box { background-color: #F5F5F5; padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1.5rem; }
-    .user-badge { display: inline-flex; align-items: center; gap: 0.4rem; background: #E3F2FD; border: 1px solid #90CAF9; border-radius: 20px; padding: 0.3rem 0.85rem; font-size: 0.85rem; color: #1565C0; font-weight: 600; }
-    .role-admin { color: #E65100; font-weight: 700; }
-    .role-user  { color: #1565C0; font-weight: 600; }
-    iframe[height="0"] { display: none !important; }
-    .batch-info-box { background: #E8F5E9; border-left: 4px solid #4CAF50; padding: 0.8rem 1rem; border-radius: 0 8px 8px 0; margin-bottom: 1rem; }
+    #custom-sidebar-toggle:hover { background: var(--mp-green-dark) !important; }
 
-                    border-radius: 0 6px 6px 0; font-size: 0.85rem; margin-bottom: 0.5rem; }
+    /* ── Headings ─────────────────────────────────────────────────── */
+    h1, h2, h3, h4, h5 { letter-spacing: -.01em; color: var(--mp-ink); }
+    h1 .accent, h2 .accent, h3 .accent { color: var(--mp-green); }
+
+    /* Legacy classes — di-recolor ke palette baru */
+    .main-header {
+        font-size: 1.95rem; font-weight: 700;
+        color: var(--mp-ink); letter-spacing: -.02em;
+        text-align: left; margin: .25rem 0 1rem; padding-top: .4rem;
+    }
+    .main-header .accent { color: var(--mp-green); }
+    .sub-header {
+        font-size: 1.05rem; font-weight: 700;
+        color: var(--mp-ink); letter-spacing: -.01em;
+        margin: 1.25rem 0 .75rem;
+    }
+    .user-badge {
+        display: inline-flex; align-items: center; gap: .45rem;
+        background: var(--mp-green-soft); border: 1px solid var(--mp-green-line);
+        border-radius: 999px; padding: .3rem .85rem;
+        font-size: .82rem; color: var(--mp-green-dark); font-weight: 600;
+    }
+    .role-admin { color: var(--mp-green-dark); font-weight: 700; letter-spacing: .04em; }
+    .role-user  { color: var(--mp-ink-50); font-weight: 600; letter-spacing: .04em; }
+    .batch-info-box {
+        background: var(--mp-green-softer);
+        border-left: 4px solid var(--mp-green);
+        padding: .8rem 1rem;
+        border-radius: 0 var(--mp-radius-sm) var(--mp-radius-sm) 0;
+        margin-bottom: 1rem; color: var(--mp-green-dark);
+    }
+
+    /* ── Primary button = green ─────────────────────────────────── */
+    .stButton > button[kind="primary"],
+    .stDownloadButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"] {
+        background: var(--mp-green) !important;
+        border: 1px solid var(--mp-green) !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-radius: var(--mp-radius-sm) !important;
+        box-shadow: 0 1px 2px rgba(2,137,18,.15);
+        transition: background .15s, border-color .15s, box-shadow .15s;
+    }
+    .stButton > button[kind="primary"]:hover,
+    .stDownloadButton > button[kind="primary"]:hover,
+    .stFormSubmitButton > button[kind="primary"]:hover {
+        background: var(--mp-green-dark) !important;
+        border-color: var(--mp-green-dark) !important;
+    }
+    .stButton > button[kind="primary"]:focus,
+    .stFormSubmitButton > button[kind="primary"]:focus {
+        box-shadow: 0 0 0 3px var(--mp-green-soft) !important;
+    }
+
+    /* Secondary button = ghost (white + green border on hover) */
+    .stButton > button[kind="secondary"],
+    .stDownloadButton > button[kind="secondary"],
+    .stFormSubmitButton > button[kind="secondary"] {
+        background: var(--mp-bg) !important;
+        border: 1px solid var(--mp-line) !important;
+        color: var(--mp-ink) !important;
+        font-weight: 600 !important;
+        border-radius: var(--mp-radius-sm) !important;
+        transition: background .15s, border-color .15s, color .15s;
+    }
+    .stButton > button[kind="secondary"]:hover,
+    .stDownloadButton > button[kind="secondary"]:hover,
+    .stFormSubmitButton > button[kind="secondary"]:hover {
+        background: var(--mp-bg-muted) !important;
+        border-color: var(--mp-green-line) !important;
+        color: var(--mp-green-dark) !important;
+    }
+
+    /* ── Tabs ─────────────────────────────────────────────────────── */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+        border-bottom: 1px solid var(--mp-line);
+        background: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 14px !important;
+        font-weight: 500;
+        font-size: 13px;
+        color: var(--mp-ink-50) !important;
+        background: transparent !important;
+        border: none !important;
+        border-bottom: 2px solid transparent !important;
+        margin-bottom: -1px;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: var(--mp-ink) !important;
+        background: transparent !important;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        color: var(--mp-green) !important;
+        font-weight: 600 !important;
+        border-bottom-color: var(--mp-green) !important;
+    }
+    .stTabs [data-baseweb="tab-highlight"] { background: transparent !important; }
+    .stTabs [data-baseweb="tab-border"] { display: none; }
+
+    /* ── Sidebar ──────────────────────────────────────────────────── */
+    [data-testid="stSidebar"] {
+        background: var(--mp-bg-muted) !important;
+        border-right: 1px solid var(--mp-line);
+    }
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding-top: 8px; }
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        font-size: .72rem !important; font-weight: 700 !important;
+        color: var(--mp-ink-50) !important;
+        letter-spacing: .08em; text-transform: uppercase;
+        margin: .9rem .2rem .25rem !important;
+    }
+    [data-testid="stSidebar"] .stButton > button {
+        background: transparent !important;
+        border: 1px solid transparent !important;
+        color: var(--mp-ink) !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        font-weight: 500 !important;
+        padding: .45rem .65rem !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover {
+        background: var(--mp-bg) !important;
+        border-color: var(--mp-line) !important;
+    }
+    [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background: var(--mp-green) !important;
+        color: white !important;
+        border-color: var(--mp-green) !important;
+    }
+    [data-testid="stSidebar"] hr { border-color: var(--mp-line) !important; margin: .6rem 0 !important; }
+    [data-testid="stSidebar"] .stMetric { background: var(--mp-bg); border-radius: var(--mp-radius-sm); padding: .5rem .65rem; border: 1px solid var(--mp-line); }
+    [data-testid="stSidebar"] [data-testid="stExpander"] { background: var(--mp-bg); border: 1px solid var(--mp-line); border-radius: var(--mp-radius-sm); margin: .35rem 0; }
+
+    /* ── Inputs ───────────────────────────────────────────────────── */
+    .stTextInput input,
+    .stTextArea textarea,
+    .stNumberInput input,
+    .stDateInput input {
+        border-radius: var(--mp-radius-sm) !important;
+        border-color: var(--mp-line) !important;
+        font-family: var(--mp-font-sans);
+    }
+    .stTextInput input:focus,
+    .stTextArea textarea:focus,
+    .stNumberInput input:focus,
+    .stDateInput input:focus,
+    .stSelectbox div[data-baseweb="select"]:focus-within,
+    .stMultiSelect div[data-baseweb="select"]:focus-within {
+        border-color: var(--mp-green) !important;
+        box-shadow: 0 0 0 3px var(--mp-green-soft) !important;
+    }
+    .stSelectbox div[data-baseweb="select"] > div,
+    .stMultiSelect div[data-baseweb="select"] > div {
+        border-radius: var(--mp-radius-sm) !important;
+        border-color: var(--mp-line) !important;
+    }
+
+    /* Radio horizontal: pill style */
+    .stRadio [role="radiogroup"] {
+        background: var(--mp-bg-muted);
+        border: 1px solid var(--mp-line);
+        border-radius: var(--mp-radius-sm);
+        padding: 3px;
+        display: inline-flex; gap: 2px;
+    }
+    .stRadio [role="radiogroup"] > label {
+        margin: 0 !important;
+        padding: 6px 12px !important;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12.5px;
+        font-weight: 500;
+        color: var(--mp-ink-50);
+    }
+    .stRadio [role="radiogroup"] > label:has(input:checked) {
+        background: var(--mp-bg);
+        color: var(--mp-green) !important;
+        font-weight: 600;
+        box-shadow: var(--mp-shadow-card);
+    }
+    .stRadio [role="radiogroup"] input[type="radio"] { display: none; }
+    /* Checkbox & radio accent */
+    input[type="checkbox"], input[type="radio"] { accent-color: var(--mp-green); }
+
+    /* ── File uploader ────────────────────────────────────────────── */
+    [data-testid="stFileUploader"] section {
+        background: var(--mp-green-softer) !important;
+        border: 2px dashed var(--mp-green-line) !important;
+        border-radius: var(--mp-radius) !important;
+    }
+    [data-testid="stFileUploader"] section:hover {
+        background: var(--mp-green-soft) !important;
+        border-color: var(--mp-green) !important;
+    }
+    [data-testid="stFileUploader"] button {
+        background: var(--mp-green) !important;
+        border: 1px solid var(--mp-green) !important;
+        color: white !important;
+        border-radius: var(--mp-radius-sm) !important;
+    }
+
+    /* ── Dataframe / table ────────────────────────────────────────── */
+    [data-testid="stDataFrame"] thead tr th,
+    [data-testid="stTable"] thead tr th {
+        background: var(--mp-bg-muted) !important;
+        color: var(--mp-ink-70) !important;
+        font-weight: 600 !important;
+        font-size: 11.5px !important;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--mp-line) !important;
+    }
+    [data-testid="stDataFrame"] tbody tr:hover td { background: var(--mp-green-softer) !important; }
+
+    /* ── Metric ───────────────────────────────────────────────────── */
+    [data-testid="stMetric"] {
+        background: var(--mp-bg);
+        border: 1px solid var(--mp-line);
+        border-radius: var(--mp-radius);
+        padding: 14px 16px;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 11px !important; font-weight: 600 !important;
+        color: var(--mp-ink-50) !important;
+        letter-spacing: .04em; text-transform: uppercase;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 24px !important; font-weight: 700 !important;
+        color: var(--mp-ink); letter-spacing: -.02em;
+    }
+    [data-testid="stMetricDelta"] { font-size: 11px !important; color: var(--mp-ink-50) !important; }
+
+    /* ── Expander ─────────────────────────────────────────────────── */
+    [data-testid="stExpander"] {
+        border: 1px solid var(--mp-line) !important;
+        border-radius: var(--mp-radius) !important;
+        background: var(--mp-bg);
+    }
+    [data-testid="stExpander"] details summary {
+        font-weight: 600 !important;
+        color: var(--mp-ink) !important;
+    }
+    [data-testid="stExpander"] details summary:hover { color: var(--mp-green-dark) !important; }
+
+    /* ── Progress bar ─────────────────────────────────────────────── */
+    .stProgress > div > div > div > div { background: var(--mp-green) !important; }
+    .stProgress > div > div > div { background: var(--mp-line-soft) !important; border-radius: 999px; height: 6px; }
+
+    /* ── Alerts ───────────────────────────────────────────────────── */
+    [data-testid="stAlert"] { border-radius: var(--mp-radius-sm) !important; border: 1px solid var(--mp-line); }
+
+    /* ── Custom utility classes untuk redesign per-screen ─────────── */
+    .mp-card {
+        background: var(--mp-bg);
+        border: 1px solid var(--mp-line);
+        border-radius: var(--mp-radius);
+        padding: 18px;
+        box-shadow: var(--mp-shadow-card);
+    }
+    .mp-card.tight { padding: 14px; }
+    .mp-card.flat  { box-shadow: none; }
+    .mp-chip {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 3px 9px; font-size: 11.5px; font-weight: 600;
+        border-radius: 999px;
+        background: var(--mp-green-soft); color: var(--mp-green-dark);
+        border: 1px solid var(--mp-green-line);
+    }
+    .mp-chip.gray  { background: var(--mp-bg-muted); color: var(--mp-ink-50); border-color: var(--mp-line); }
+    .mp-chip.amber { background: var(--mp-amber-soft); color: var(--mp-amber); border-color: var(--mp-amber-line); }
+    .mp-chip.red   { background: var(--mp-red-soft); color: var(--mp-red); border-color: var(--mp-red-line); }
+    .mp-chip.blue  { background: var(--mp-blue-soft); color: var(--mp-blue); border-color: #BAD0F0; }
+    .mp-mono { font-family: var(--mp-font-mono); letter-spacing: .01em; }
+
+    .mp-banner {
+        display: flex; gap: 10px;
+        padding: 10px 14px;
+        border-radius: var(--mp-radius-sm);
+        font-size: 12.5px;
+        align-items: flex-start;
+    }
+    .mp-banner.info { background: var(--mp-green-softer); border: 1px solid var(--mp-green-line); color: var(--mp-green-dark); }
+    .mp-banner.warn { background: var(--mp-amber-soft); border: 1px solid var(--mp-amber-line); color: var(--mp-amber); }
+    .mp-banner.err  { background: var(--mp-red-soft); border: 1px solid var(--mp-red-line); color: var(--mp-red); }
+
+    /* Sidebar logo + user badge cards (untuk Phase B) */
+    .mp-sb-brand {
+        display: flex; align-items: center; gap: 10px;
+        padding: 6px 8px 12px;
+    }
+    .mp-sb-brand .logo {
+        width: 36px; height: 36px; border-radius: 9px;
+        background: var(--mp-green); color: white;
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 800; font-size: 18px; letter-spacing: -.02em;
+        box-shadow: 0 2px 6px rgba(2,137,18,.25);
+    }
+    .mp-sb-brand .name { font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: var(--mp-ink); }
+    .mp-sb-brand .tag  { font-size: 10.5px; color: var(--mp-ink-50); letter-spacing: .04em; text-transform: uppercase; }
+
+    .mp-sb-user {
+        background: var(--mp-bg);
+        border: 1px solid var(--mp-line);
+        border-radius: var(--mp-radius-sm);
+        padding: 10px 12px;
+        margin-bottom: 8px;
+    }
+    .mp-sb-user .row { display: flex; align-items: center; gap: 9px; }
+    .mp-sb-user .avatar {
+        width: 30px; height: 30px; border-radius: 999px;
+        background: var(--mp-green-soft); color: var(--mp-green-dark);
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 12px;
+        flex: none;
+    }
+    .mp-sb-user .name { font-size: 12.5px; font-weight: 600; color: var(--mp-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mp-sb-user .meta { font-size: 10.5px; color: var(--mp-ink-50); }
+    .mp-sb-user .meta .role-pill {
+        font-weight: 700; letter-spacing: .04em;
+    }
+    .mp-sb-user .meta .role-pill.admin { color: var(--mp-green); }
+    .mp-sb-user .meta .role-pill.user  { color: var(--mp-ink-70); }
+
+    .mp-sb-section {
+        font-size: 10.5px; font-weight: 700;
+        color: var(--mp-ink-50);
+        letter-spacing: .08em; text-transform: uppercase;
+        margin: 14px 4px 4px;
+    }
+
+    .mp-sb-stat {
+        display: flex; justify-content: space-between;
+        padding: 4px 8px; font-size: 11.5px; color: var(--mp-ink-50);
+    }
+    .mp-sb-stat b { color: var(--mp-ink); font-weight: 600; }
+    .mp-sb-stat b.green { color: var(--mp-green); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1098,20 +1501,127 @@ class LoginManager:
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
     inject_keep_alive()
-    st.markdown('<div class="login-page">', unsafe_allow_html=True)
-    _, col, _ = st.columns([1, 2, 1])
-    with col:
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown("# 🔍 Part Number Finder")
-        st.markdown("Silakan login untuk melanjutkan.")
-        st.divider()
+
+    # Background gradient untuk login page + center content vertikal
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"] {
+            background: linear-gradient(180deg, #FFFFFF 0%, #F1FAF2 100%) !important;
+            min-height: 100vh !important;
+        }
+        .stApp { background: linear-gradient(180deg, #FFFFFF 0%, #F1FAF2 100%) !important; }
+        header[data-testid="stHeader"] { display: none !important; }
+        div[data-testid="stToolbar"] { display: none !important; }
+        [data-testid="stSidebar"] { display: none !important; }
+        section.main, section[data-testid="stMain"], [data-testid="stMain"] {
+            background: transparent !important;
+            min-height: 100vh !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: center !important;
+            align-items: center !important;
+        }
+        section.main > div.block-container,
+        section[data-testid="stMain"] > div.block-container,
+        div[data-testid="stMainBlockContainer"],
+        .block-container {
+            padding: 2rem 3rem !important;
+            margin: 0 auto !important;
+            max-width: 1500px !important;
+            width: 100% !important;
+            flex: 0 0 auto !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_brand, col_card = st.columns([1.2, 1.0], gap="large")
+
+    # ── Left: brand + tagline + stats ─────────────────────────────────
+    with col_brand:
+        # Hitung file Excel langsung dari filesystem supaya angka valid
+        # sejak login page (file belum di-index sebelum login).
+        n_files = st.session_state.get("loaded_files_count", 0)
+        if not n_files:
+            try:
+                n_files = sum(1 for _ in DATA_FOLDER.rglob("*.xlsx")
+                              if not _.name.startswith("~$"))
+            except Exception:
+                n_files = 0
+        n_files_str = f"{n_files:,}" if n_files else "—"
+        st.markdown(
+            f"""
+            <div>
+                <div style="display:inline-flex; align-items:center; gap:12px; margin-bottom:24px;">
+                    <div style="width:52px;height:52px;border-radius:12px;background:var(--mp-green);
+                                color:white;display:flex;align-items:center;justify-content:center;
+                                font-weight:800;font-size:26px;letter-spacing:-.02em;
+                                box-shadow:0 6px 18px rgba(2,137,18,.25);">M</div>
+                    <div>
+                        <div style="font-size:26px;font-weight:800;letter-spacing:-.02em;line-height:1;">MasPart</div>
+                        <div style="font-size:11.5px;color:var(--mp-ink-50);margin-top:4px;
+                                    letter-spacing:.04em;text-transform:uppercase;font-weight:600;">
+                            Part Number Finder
+                        </div>
+                    </div>
+                </div>
+                <h1 style="font-size:34px;font-weight:700;line-height:1.18;letter-spacing:-.02em;
+                            margin:0 0 16px;color:var(--mp-ink);">
+                    Cari sparepart <span style="color:var(--mp-green);">tanpa buka katalog manual</span>.
+                </h1>
+                <p style="font-size:14px;color:var(--mp-ink-70);line-height:1.6;margin:0 0 24px;max-width:440px;">
+                    Database part Sinotruk · Shantui · Weichai, lengkap dengan foto SIMS,
+                    harga real-time, stok opname per user, dan tools batch.
+                </p>
+                <div style="display:flex; gap:24px; flex-wrap:wrap;">
+                    <div>
+                        <div style="font-size:22px;font-weight:700;color:var(--mp-green);">{n_files_str}</div>
+                        <div style="font-size:11px;color:var(--mp-ink-50);letter-spacing:.04em;
+                                    text-transform:uppercase;font-weight:600;">File Excel</div>
+                    </div>
+                    <div>
+                        <div style="font-size:22px;font-weight:700;color:var(--mp-green);">3</div>
+                        <div style="font-size:11px;color:var(--mp-ink-50);letter-spacing:.04em;
+                                    text-transform:uppercase;font-weight:600;">Brand</div>
+                    </div>
+                    <div>
+                        <div style="font-size:22px;font-weight:700;color:var(--mp-green);">●</div>
+                        <div style="font-size:11px;color:var(--mp-ink-50);letter-spacing:.04em;
+                                    text-transform:uppercase;font-weight:600;">Supabase Live</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # ── Right: login card ─────────────────────────────────────────────
+    with col_card:
+        st.markdown(
+            '<div style="background:white;border:1px solid var(--mp-line);border-radius:14px;'
+            'padding:28px;box-shadow:0 10px 40px rgba(15,26,18,.08), 0 2px 6px rgba(15,26,18,.04);">'
+            '<div style="font-size:18px;font-weight:700;letter-spacing:-.01em;">Masuk ke akun Anda</div>'
+            f'<div style="font-size:12.5px;color:var(--mp-ink-50);margin-top:4px;">'
+            f'Sesi aktif {SESSION_TIMEOUT_MINUTES} menit setelah login.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         if error_msg:
             st.error(error_msg, icon="⚠️")
             st.session_state["login_error"] = None
-        with st.form(key="login_form", clear_on_submit=True):
-            username  = st.text_input("👤 Username", placeholder="Masukkan username")
-            password  = st.text_input("🔑 Password", type="password", placeholder="Masukkan password")
-            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+        with st.form(key="login_form", clear_on_submit=False):
+            username  = st.text_input("Username", placeholder="Masukkan username")
+            password  = st.text_input("Password", type="password", placeholder="••••••••")
+            submitted = st.form_submit_button("Login →", type="primary", use_container_width=True)
+        st.markdown(
+            '<div style="font-size:11.5px;color:var(--mp-ink-50);margin-top:14px;text-align:center;">'
+            'Butuh akun? Hubungi admin'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
     if submitted:
         if not username or not password:
             st.session_state["login_error"] = "Username dan password tidak boleh kosong."
@@ -1125,7 +1635,6 @@ def render_login_page(login_mgr: LoginManager):
         else:
             st.session_state["login_error"] = "Username atau password salah."
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ── Search Functions ────────────────────────────────────────────────
@@ -1876,13 +2385,27 @@ class ExcelSearchApp:
 
     # ── Tab: Search Part Number ──────────────────────────────────────
     def _render_tab_search_pn(self):
+        st.markdown(
+            '<div style="margin: .25rem 0 .75rem;">'
+            '<div style="font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--mp-ink);">'
+            'Cari <span style="color:var(--mp-green);">Part Number</span></div>'
+            '<div style="font-size:12px;color:var(--mp-ink-50);margin-top:2px;">'
+            'Pencocokan exact pada kolom B (Part Number) \u00b7 fallback otomatis ke SIMS jika tidak ditemukan.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
         with st.form(key="search_pn_form", clear_on_submit=False):
-            sn_input = st.text_input(
-                "Masukkan Part Number:",
-                placeholder="Contoh: WG1642821034/1",
-                key="sn_input"
-            )
-            if st.form_submit_button("\U0001f50d Cari Part Number", type="primary", use_container_width=True):
+            col_input, col_btn = st.columns([4, 1])
+            with col_input:
+                sn_input = st.text_input(
+                    "Part Number",
+                    placeholder="Contoh: WG1642821034/1",
+                    key="sn_input",
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                go = st.form_submit_button("\U0001f50d Cari", type="primary", use_container_width=True)
+            if go:
                 if sn_input:
                     with st.spinner("Mencari\u2026"):
                         st.session_state.search_results = search_part_number(
@@ -1896,16 +2419,33 @@ class ExcelSearchApp:
                         st.rerun()
                 else:
                     st.warning("Masukkan part number untuk mencari.")
+        # Empty state — sebelum user search apapun
+        if not st.session_state.get("search_results") and not st.session_state.get("search_term"):
+            self._render_search_empty_state(kind="pn")
 
     # ── Tab: Search Part Name ────────────────────────────────────────
     def _render_tab_search_name(self):
+        st.markdown(
+            '<div style="margin: .25rem 0 .75rem;">'
+            '<div style="font-size:15px;font-weight:700;letter-spacing:-.01em;color:var(--mp-ink);">'
+            'Cari <span style="color:var(--mp-green);">Part Name</span></div>'
+            '<div style="font-size:12px;color:var(--mp-ink-50);margin-top:2px;">'
+            'Pencarian substring pada kolom D (Part Name) - case-insensitive.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
         with st.form(key="search_name_form", clear_on_submit=False):
-            name_input = st.text_input(
-                "Masukkan Part Name:",
-                placeholder="Contoh: baut roda, bearing, kampas rem",
-                key="name_input"
-            )
-            if st.form_submit_button("\U0001f50d Cari Part Name", type="primary", use_container_width=True):
+            col_input, col_btn = st.columns([4, 1])
+            with col_input:
+                name_input = st.text_input(
+                    "Part Name",
+                    placeholder="Contoh: baut roda, bearing, kampas rem",
+                    key="name_input",
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                go = st.form_submit_button("\U0001f50d Cari", type="primary", use_container_width=True)
+            if go:
                 if name_input:
                     with st.spinner("Mencari\u2026"):
                         st.session_state.search_results = search_part_name(
@@ -1919,6 +2459,147 @@ class ExcelSearchApp:
                         st.rerun()
                 else:
                     st.warning("Masukkan nama part untuk mencari.")
+        # Empty state — sebelum user search apapun
+        if not st.session_state.get("search_results") and not st.session_state.get("search_term"):
+            self._render_search_empty_state(kind="name")
+
+    # ── Empty state untuk Search PN / Search Name ───────────────────
+    def _render_search_empty_state(self, kind: str = "pn"):
+        n_files = st.session_state.get("loaded_files_count", 0) or 0
+        idx_time = st.session_state.get("last_index_time")
+        idx_str  = idx_time.strftime("%H:%M:%S") if idx_time else "—"
+        excel_files = st.session_state.get("excel_files", []) or []
+        # Estimasi part: jumlah row dari semua dataframe (jika tersedia)
+        try:
+            est_parts = sum(len(fi.get("dataframe", [])) for fi in excel_files)
+        except Exception:
+            est_parts = 0
+        try:
+            brands = {fi.get("relative_path", "").split("\\")[0].split("/")[0]
+                      for fi in excel_files if fi.get("relative_path")}
+            n_brands = len([b for b in brands if b])
+        except Exception:
+            n_brands = 0
+
+        user = LoginManager.get_current_user() or {}
+        login_str = user["login_time"].strftime("%H:%M") if user.get("login_time") else "—"
+
+        # ── 4 KPI tiles ──────────────────────────────────────────────
+        st.markdown(
+            f"""
+<div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:10px;margin:1rem 0 .8rem;">
+  <div class="mp-card" style="padding:14px 16px;">
+    <div style="font-size:11px;font-weight:600;color:var(--mp-ink-50);letter-spacing:.04em;text-transform:uppercase;">File Excel</div>
+    <div style="font-size:24px;font-weight:700;color:var(--mp-ink);letter-spacing:-.02em;line-height:1.1;margin-top:6px;">{n_files}</div>
+    <div style="font-size:11px;color:var(--mp-ink-50);margin-top:4px;">terindex &amp; siap dicari</div>
+  </div>
+  <div class="mp-card" style="padding:14px 16px;">
+    <div style="font-size:11px;font-weight:600;color:var(--mp-ink-50);letter-spacing:.04em;text-transform:uppercase;">Estimasi Part</div>
+    <div style="font-size:24px;font-weight:700;color:var(--mp-green);letter-spacing:-.02em;line-height:1.1;margin-top:6px;">{est_parts:,}</div>
+    <div style="font-size:11px;color:var(--mp-ink-50);margin-top:4px;">baris di semua sheet</div>
+  </div>
+  <div class="mp-card" style="padding:14px 16px;">
+    <div style="font-size:11px;font-weight:600;color:var(--mp-ink-50);letter-spacing:.04em;text-transform:uppercase;">Brand &amp; Unit</div>
+    <div style="font-size:24px;font-weight:700;color:var(--mp-ink);letter-spacing:-.02em;line-height:1.1;margin-top:6px;">{n_brands or '—'}</div>
+    <div style="font-size:11px;color:var(--mp-ink-50);margin-top:4px;">folder data terdeteksi</div>
+  </div>
+  <div class="mp-card" style="padding:14px 16px;">
+    <div style="font-size:11px;font-weight:600;color:var(--mp-ink-50);letter-spacing:.04em;text-transform:uppercase;">Status Index</div>
+    <div style="font-size:24px;font-weight:700;color:var(--mp-green);letter-spacing:-.02em;line-height:1.1;margin-top:6px;">● Live</div>
+    <div style="font-size:11px;color:var(--mp-ink-50);margin-top:4px;">diperbarui {idx_str}</div>
+  </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        # ── 2-col: Tips + Quick examples / Other features ───────────
+        col_tips, col_actions = st.columns([1, 1])
+        with col_tips:
+            tip_title = ("Tips Pencarian Part Number" if kind == "pn"
+                         else "Tips Pencarian Part Name")
+            tip_items = (
+                [
+                    "Ketik <b>part number lengkap</b> (mis. <code>WG1642821034</code>) untuk match exact.",
+                    "Cocok juga untuk format dengan slash: <code>WG1642821034/1</code>.",
+                    "Jika tidak ditemukan di Excel lokal, sistem auto-fallback ke <b>SIMS</b>.",
+                    "Pakai tab <b>Cari by Foto</b> kalau hanya punya gambar part.",
+                ]
+                if kind == "pn"
+                else [
+                    "Ketik <b>kata kunci</b> (mis. <code>baut roda</code>, <code>bearing</code>).",
+                    "Pencarian <b>case-insensitive</b> &amp; <b>substring</b> di kolom D.",
+                    "Hasil banyak? Gunakan kata kunci lebih spesifik (mis. <code>kampas rem depan</code>).",
+                    "Untuk pencarian akurat, gunakan <b>Search Part Number</b>.",
+                ]
+            )
+            tips_html = "".join(
+                f'<li style="margin:8px 0;color:var(--mp-ink-70);line-height:1.5;">{t}</li>'
+                for t in tip_items
+            )
+            st.markdown(
+                f"""
+<div class="mp-card" style="padding:16px 18px;">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+    <div style="width:24px;height:24px;border-radius:6px;background:var(--mp-green-soft);
+                color:var(--mp-green-dark);display:flex;align-items:center;justify-content:center;
+                font-size:13px;flex:none;">💡</div>
+    <div style="font-size:13.5px;font-weight:700;letter-spacing:-.01em;">{tip_title}</div>
+  </div>
+  <ul style="margin:.5rem 0 0;padding-left:1.1rem;font-size:12.5px;">{tips_html}</ul>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+        with col_actions:
+            example_items = (
+                [("WG1642821034", "Clutch Master Cylinder"),
+                 ("WG9925520270", "Brake Chamber T24"),
+                 ("AZ9100443082", "Air Dryer Cartridge")]
+                if kind == "pn"
+                else [("baut roda", "Cari semua part nama 'baut roda'"),
+                      ("bearing",   "Cari semua bearing di database"),
+                      ("kampas rem","Cari kampas rem (depan/belakang)")]
+            )
+            rows_html = "".join(
+                f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                f'padding:10px 12px;border:1px solid var(--mp-line);border-radius:8px;'
+                f'background:var(--mp-bg);margin-bottom:6px;">'
+                f'<span style="font-family:var(--mp-font-mono);font-weight:600;font-size:12.5px;color:var(--mp-ink);">{val}</span>'
+                f'<span style="font-size:11.5px;color:var(--mp-ink-50);">{desc}</span>'
+                f'</div>'
+                for val, desc in example_items
+            )
+            title_lbl = "Contoh Part Number" if kind == "pn" else "Contoh Kata Kunci"
+            st.markdown(
+                f"""
+<div class="mp-card" style="padding:16px 18px;">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+    <div style="width:24px;height:24px;border-radius:6px;background:var(--mp-green-soft);
+                color:var(--mp-green-dark);display:flex;align-items:center;justify-content:center;
+                font-size:13px;flex:none;">✨</div>
+    <div style="font-size:13.5px;font-weight:700;letter-spacing:-.01em;">{title_lbl}</div>
+  </div>
+  {rows_html}
+  <div style="font-size:11px;color:var(--mp-ink-50);margin-top:8px;">
+    Salin salah satu di atas ke kotak pencarian lalu klik <b>Cari</b>.
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+        # ── Info banner di bawah ────────────────────────────────────
+        login_user = user.get("username", "—").title() if user else "—"
+        st.markdown(
+            f'<div class="mp-banner info" style="margin-top:12px;">'
+            f'<div style="width:18px;flex:none;">👋</div>'
+            f'<div>Halo <b>{login_user}</b>, mulai dengan mengetik di kotak '
+            f'pencarian atau gunakan tab lain di atas. Sesi login Anda dimulai pukul '
+            f'<b>{login_str}</b>.</div></div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Tab: Bandingkan 2 Part (Interchange Analyzer) ────────────────
     def _render_tab_compare_parts(self):
@@ -1928,13 +2609,14 @@ class ExcelSearchApp:
             st.error(f"Modul perbandingan tidak tersedia: {e}")
             return
 
-        st.markdown("### 🔄 Bandingkan 2 Part — Cek Interchange")
         st.markdown(
-            "<div style='color:#555;font-size:.9rem;margin-bottom:8px;'>"
-            "Masukkan 2 Part Number. Sistem mengambil foto + nama part dari SIMS, "
-            "lalu menilai apakah kedua part kemungkinan <b>interchangeable</b> "
-            "berdasarkan kemiripan <b>BENTUK</b> (utama), <b>NAMA</b>, dan <b>WARNA</b> (info)."
-            "</div>",
+            '<div style="margin:.25rem 0 .75rem;">'
+            '<div style="font-size:18px;font-weight:700;letter-spacing:-.015em;color:var(--mp-ink);">'
+            'Bandingkan <span style="color:var(--mp-green);">2 Part</span></div>'
+            '<div style="font-size:12.5px;color:var(--mp-ink-50);margin-top:4px;">'
+            'Cek interchange — kemiripan <b>BENTUK</b> (utama), <b>NAMA</b> (penguat), '
+            'dan <b>WARNA</b> (info) dari foto SIMS.'
+            '</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -2061,92 +2743,104 @@ class ExcelSearchApp:
 
         st.divider()
 
-        # ── Verdict utama (interchange) ──────────────────────────────
-        verdict = best["verdict"]
-        vcolor  = best["color"]
-        shape   = best["shape_score"]
-        color_s = best["color_score"]
-        name_s  = best.get("name_score")
+        # ── Verdict utama (interchange) — hero card style sesuai mock ──
+        verdict   = best["verdict"]
+        vcolor    = best["color"]                       # color dari engine (hex)
+        shape     = best["shape_score"]
+        color_s   = best["color_score"]
+        name_s    = best.get("name_score")
+        overall   = (
+            (shape * 0.6 + (name_s or 0) * 0.25 + color_s * 0.15)
+            if name_s is not None else (shape * 0.7 + color_s * 0.3)
+        ) * 100.0
+
+        # Hero verdict — gradient soft + big icon + headline besar
+        verdict_strong = shape >= 0.75 or (name_s is not None and name_s >= 0.85)
+        ICON = "✓" if verdict_strong else "?"
         st.markdown(
             f"""
-<div style="
-    background:linear-gradient(90deg,{vcolor}22,{vcolor}08);
-    border-left:6px solid {vcolor};
-    padding:14px 18px;border-radius:10px;margin:8px 0 16px 0;">
-  <div style="font-size:.85rem;color:#555;">Hasil Analisis Interchange</div>
-  <div style="font-size:1.7rem;font-weight:700;color:{vcolor};line-height:1.15;">
-    {verdict}
-  </div>
-  <div style="font-size:.8rem;color:#666;margin-top:6px;">
-    Pasangan foto terbaik: gambar #{best['i']+1} ({pn1}) vs #{best['j']+1} ({pn2})
+<div style="border:1px solid var(--mp-green-line);border-left:6px solid {vcolor};
+            background:linear-gradient(90deg, var(--mp-green-soft) 0%, var(--mp-green-softer) 100%);
+            border-radius:var(--mp-radius);padding:18px;margin:8px 0 16px 0;">
+  <div style="display:flex;align-items:center;gap:16px;">
+    <div style="width:56px;height:56px;border-radius:14px;background:{vcolor};
+                color:white;display:flex;align-items:center;justify-content:center;
+                font-size:30px;font-weight:800;flex:none;
+                box-shadow:0 4px 14px {vcolor}55;">{ICON}</div>
+    <div style="flex:1;min-width:0;">
+      <div style="font-size:11px;font-weight:700;color:var(--mp-green-dark);
+                  letter-spacing:.08em;text-transform:uppercase;">Hasil Analisis</div>
+      <div style="font-size:24px;font-weight:800;color:{vcolor};
+                  letter-spacing:-.01em;line-height:1.15;margin-top:2px;">{verdict}</div>
+      <div style="font-size:12.5px;color:var(--mp-ink-70);margin-top:6px;">
+        Pasangan foto terbaik: gambar #{best['i']+1} ({pn1}) vs #{best['j']+1} ({pn2}) ·
+        overall <b style="color:var(--mp-green-dark);">{overall:.1f}%</b>
+      </div>
+    </div>
   </div>
 </div>
 """,
             unsafe_allow_html=True,
         )
 
-        # ── 3 sinyal terpisah: Bentuk / Nama / Warna ─────────────────
+        # ── 3 signal cards: Bentuk / Nama / Warna ────────────────────
         def _signal_color(v):
-            if v is None:        return "#9CA3AF"
-            if v >= 0.75:        return "#16A34A"
-            if v >= 0.55:        return "#CA8A04"
-            return "#DC2626"
+            if v is None:        return "var(--mp-ink-30)"
+            if v >= 0.75:        return "var(--mp-green)"
+            if v >= 0.55:        return "var(--mp-amber)"
+            return "var(--mp-red)"
+
+        def _signal_card(emoji, title, badge_label, value, desc, accent):
+            value_str = f"{value*100:.1f}" if value is not None else "—"
+            pct_w = max(0, min(100, (value or 0) * 100)) if value is not None else 0
+            sub_unit = "<span style='font-size:18px;'>%</span>" if value is not None else ""
+            return (
+                f'<div class="mp-card" style="padding:14px;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                f'<span style="font-size:11px;font-weight:700;color:var(--mp-ink-50);'
+                f'letter-spacing:.08em;text-transform:uppercase;">{emoji} {title}</span>'
+                f'<span class="mp-chip gray" style="font-size:10px;">{badge_label}</span>'
+                f'</div>'
+                f'<div style="font-size:30px;font-weight:800;color:{accent};'
+                f'letter-spacing:-.02em;margin-top:8px;line-height:1.1;">{value_str}{sub_unit}</div>'
+                f'<div class="stProgress" style="margin-top:10px;"><div style="height:6px;'
+                f'background:var(--mp-line-soft);border-radius:999px;overflow:hidden;">'
+                f'<div style="width:{pct_w}%;height:100%;background:{accent};"></div></div></div>'
+                f'<div style="font-size:11px;color:var(--mp-ink-50);margin-top:8px;">{desc}</div>'
+                f'</div>'
+            )
 
         s1, s2, s3 = st.columns(3)
         with s1:
-            c = _signal_color(shape)
-            st.markdown(
-                f"""
-<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;text-align:center;">
-  <div style="font-size:.78rem;color:#6b7280;">🔧 BENTUK (penentu utama)</div>
-  <div style="font-size:1.8rem;font-weight:700;color:{c};">{shape*100:.1f}%</div>
-  <div style="font-size:.72rem;color:#888;">pHash + dHash + SSIM + edge + aspect</div>
-</div>""",
-                unsafe_allow_html=True,
-            )
+            st.markdown(_signal_card("🔧", "BENTUK", "utama", shape,
+                                     "pHash + dHash + SSIM + edge + aspect",
+                                     _signal_color(shape)),
+                        unsafe_allow_html=True)
         with s2:
             if name_s is None:
-                st.markdown(
-                    """
-<div style="border:1px dashed #d1d5db;border-radius:10px;padding:12px;text-align:center;">
-  <div style="font-size:.78rem;color:#6b7280;">📝 NAMA PART</div>
-  <div style="font-size:1.4rem;font-weight:600;color:#9CA3AF;">N/A</div>
-  <div style="font-size:.72rem;color:#888;">partName SIMS tidak tersedia</div>
-</div>""",
-                    unsafe_allow_html=True,
-                )
+                st.markdown(_signal_card("📝", "NAMA PART", "tidak ada", None,
+                                         "partName SIMS tidak tersedia",
+                                         "var(--mp-ink-30)"),
+                            unsafe_allow_html=True)
             else:
-                c = _signal_color(name_s)
-                st.markdown(
-                    f"""
-<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;text-align:center;">
-  <div style="font-size:.78rem;color:#6b7280;">📝 NAMA PART (penguat)</div>
-  <div style="font-size:1.8rem;font-weight:700;color:{c};">{name_s*100:.1f}%</div>
-  <div style="font-size:.72rem;color:#888;">SequenceMatcher + token Jaccard</div>
-</div>""",
-                    unsafe_allow_html=True,
-                )
+                st.markdown(_signal_card("📝", "NAMA PART", "penguat", name_s,
+                                         "SequenceMatcher + token Jaccard",
+                                         _signal_color(name_s)),
+                            unsafe_allow_html=True)
         with s3:
-            c = _signal_color(color_s)
-            st.markdown(
-                f"""
-<div style="border:1px solid #e5e7eb;border-radius:10px;padding:12px;text-align:center;">
-  <div style="font-size:.78rem;color:#6b7280;">🎨 WARNA (info saja)</div>
-  <div style="font-size:1.8rem;font-weight:700;color:{c};">{color_s*100:.1f}%</div>
-  <div style="font-size:.72rem;color:#888;">histogram + mean color</div>
-</div>""",
-                unsafe_allow_html=True,
-            )
+            st.markdown(_signal_card("🎨", "WARNA", "info", color_s,
+                                     "histogram RGB + mean color",
+                                     _signal_color(color_s)),
+                        unsafe_allow_html=True)
 
-        # ── Disclaimer ───────────────────────────────────────────────
+        # ── Disclaimer banner ────────────────────────────────────────
         st.markdown(
-            """
-<div style="background:#FFFBEB;border-left:4px solid #F59E0B;padding:8px 12px;
-            border-radius:6px;margin:10px 0;font-size:.82rem;color:#92400E;">
-⚠️ <b>Catatan:</b> Analisis ini berbasis foto SIMS — hanya indikator awal interchange.
-Verifikasi fisik (dimensi, threading, material) dan cross-reference dokumen OEM
-tetap diperlukan sebelum keputusan final.
-</div>""",
+            '<div class="mp-banner warn" style="margin:14px 0 8px;">'
+            '<div style="width:18px;flex:none;">⚠</div>'
+            '<div><b>Catatan:</b> Analisis berbasis foto SIMS — hanya indikator awal '
+            'interchange. Verifikasi fisik (dimensi, threading, material) dan '
+            'cross-reference dokumen OEM tetap diperlukan sebelum keputusan final.</div>'
+            '</div>',
             unsafe_allow_html=True,
         )
 
@@ -3289,46 +3983,78 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
         user = LoginManager.get_current_user()
         role = user["role"] if user else "user"
         inject_keep_alive()
-        st.markdown('<h1 class="main-header">🔍 Part Number Finder</h1>', unsafe_allow_html=True)
+        n_files = st.session_state.get("loaded_files_count", 0)
+        idx_time = st.session_state.get("last_index_time")
+        idx_human = idx_time.strftime("%H:%M:%S") if idx_time else "—"
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:flex-end;justify-content:space-between;
+                        gap:16px;flex-wrap:wrap;
+                        padding:.5rem 0 1rem;border-bottom:1px solid var(--mp-line);
+                        margin:-.5rem 0 1.5rem;">
+                <div>
+                    <h1 style="font-size:24px;font-weight:700;letter-spacing:-.015em;
+                                margin:0;color:var(--mp-ink);">
+                        Part Number <span style="color:var(--mp-green);">Finder</span>
+                    </h1>
+                    <div style="font-size:12.5px;color:var(--mp-ink-50);margin-top:4px;">
+                        {n_files} file Excel terindex · Index ●&nbsp;Live · diperbarui {idx_human}
+                    </div>
+                </div>
+                <div style="display:flex;gap:6px;font-size:11.5px;color:var(--mp-ink-50);">
+                    <span class="mp-chip">● Online</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         with st.sidebar:
-            badge_cls = "role-admin" if role == "admin" else "role-user"
+            # Brand header
             st.markdown(
-                f'<div class="user-badge">👤 {user["username"].title()}' +
-                f' — <span class="{badge_cls}">{role.upper()}</span></div>',
-                unsafe_allow_html=True
+                '<div class="mp-sb-brand">'
+                '<div class="logo">M</div>'
+                '<div>'
+                '<div class="name">MasPart</div>'
+                '<div class="tag">Part Number Finder</div>'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True,
             )
-            st.caption(f"Login pukul {user['login_time'].strftime('%H:%M')} · Timeout {SESSION_TIMEOUT_MINUTES} min")
 
-            if st.button("🚪 Logout", type="secondary", use_container_width=True):
-                LoginManager.logout()
-                for k in ("excel_files","index_data","search_results",
-                          "last_index_time","loaded_files_count","last_file_count"):
-                    st.session_state.pop(k, None)
-                st.rerun()
-            st.divider()
+            # User badge card
+            uname = user["username"]
+            initials = "".join([p[0] for p in uname.replace(".", " ").split()[:2]]).upper() or uname[:2].upper()
+            login_str = user["login_time"].strftime("%H:%M")
+            role_class = "admin" if role == "admin" else "user"
+            st.markdown(
+                f'<div class="mp-sb-user">'
+                f'<div class="row">'
+                f'<div class="avatar">{initials}</div>'
+                f'<div style="min-width:0;flex:1">'
+                f'<div class="name">{uname.title()}</div>'
+                f'<div class="meta">'
+                f'<span class="role-pill {role_class}">{role.upper()}</span>'
+                f' · {login_str} · timeout {SESSION_TIMEOUT_MINUTES}m'
+                f'</div>'
+                f'</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
-            if role == "admin":
-                st.markdown("### 🛡️ Admin Panel")
-                if st.button("👥 Reload Users", type="secondary", use_container_width=True):
-                    st.session_state.login_users_df = LoginManager._load_users()
-                    st.toast("✅ Data user telah di-reload!")
-                if st.button("🔐 Reload Menu Config", type="secondary", use_container_width=True):
-                    MenuAccessManager.load_permissions(force=True)
-                    st.toast("✅ Konfigurasi akses menu di-reload!")
-                if st.button("🔒 Reload Kolom Config", type="secondary", use_container_width=True):
-                    ColumnAccessManager.load_permissions(force=True)
-                    st.toast("✅ Konfigurasi akses kolom di-reload!")
-                df_users = st.session_state.get("login_users_df", pd.DataFrame())
-                if not df_users.empty:
-                    with st.expander("📋 Daftar User"):
-                        st.dataframe(df_users[["username","role"]].rename(
-                            columns={"username":"Username","role":"Role"}),
-                            hide_index=True)
-                st.divider()
-
-            st.markdown("### 📊 Status Sistem")
-            if st.button("🔄 Refresh Data", type="secondary", use_container_width=True):
+            # ── Section: Sistem (status + refresh) ─────────────────
+            st.markdown('<div class="mp-sb-section">Sistem</div>', unsafe_allow_html=True)
+            n_files = st.session_state.get("loaded_files_count", 0)
+            idx_time = st.session_state.get("last_index_time")
+            idx_str = idx_time.strftime("%H:%M:%S") if idx_time else "—"
+            st.markdown(
+                f'<div class="mp-sb-stat"><span>File Excel</span><b>{n_files}</b></div>'
+                f'<div class="mp-sb-stat"><span>Index</span><b class="green">● Live</b></div>'
+                f'<div class="mp-sb-stat"><span>Terakhir index</span><b>{idx_str}</b></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("🔄 Refresh Data", type="secondary", use_container_width=True, key="sb_refresh_data"):
                 for cf in CACHE_FOLDER.glob("*.pkl"):
                     try: cf.unlink()
                     except Exception: pass
@@ -3340,24 +4066,45 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 self.auto_load_excel_files()
                 st.rerun()
 
-            if st.session_state.get("last_index_time"):
-                st.markdown(f"**Terakhir di-index:**\n`{st.session_state.last_index_time.strftime('%Y-%m-%d %H:%M:%S')}`")
-            st.divider()
-            st.markdown("### 📈 Statistik")
-            st.metric("File Excel", st.session_state.get("loaded_files_count", 0))
-            st.divider()
+            # ── Section: Admin Panel ───────────────────────────────
+            if role == "admin":
+                st.markdown('<div class="mp-sb-section">Admin Panel</div>', unsafe_allow_html=True)
+                if st.button("👥 Reload Users", type="secondary", use_container_width=True, key="sb_reload_users"):
+                    st.session_state.login_users_df = LoginManager._load_users()
+                    st.toast("✅ Data user telah di-reload!")
+                if st.button("🔐 Reload Menu Config", type="secondary", use_container_width=True, key="sb_reload_menu"):
+                    MenuAccessManager.load_permissions(force=True)
+                    st.toast("✅ Konfigurasi akses menu di-reload!")
+                if st.button("🔒 Reload Kolom Config", type="secondary", use_container_width=True, key="sb_reload_col"):
+                    ColumnAccessManager.load_permissions(force=True)
+                    st.toast("✅ Konfigurasi akses kolom di-reload!")
+                df_users = st.session_state.get("login_users_df", pd.DataFrame())
+                if not df_users.empty:
+                    with st.expander("📋 Daftar User"):
+                        st.dataframe(
+                            df_users[["username","role"]].rename(columns={"username":"Username","role":"Role"}),
+                            hide_index=True,
+                        )
 
-            st.markdown("### 📁 Struktur Folder")
-            st.info(f"File Excel dibaca dari:\n```\n{self.data_folder.absolute()}\n```")
-
+            # ── Section: Bantuan ───────────────────────────────────
+            st.markdown('<div class="mp-sb-section">Bantuan</div>', unsafe_allow_html=True)
             with st.expander("📖 Panduan Cepat"):
                 st.markdown("""
 1. Letakkan file Excel di folder `data/`
 2. **Part Number** → kolom B | **Part Name** → kolom D
 3. **Stok:** data/stok/stok.xlsx (Kol A=PN, Kol D=Stok)
 4. **Batch Download:** Upload Excel berisi PN di Kol A
-
                 """)
+            st.caption(f"📁 Data: `{self.data_folder.name}/`")
+
+            # ── Logout di paling bawah ─────────────────────────────
+            st.markdown('<div class="mp-sb-section">Akun</div>', unsafe_allow_html=True)
+            if st.button("🚪 Logout", type="secondary", use_container_width=True, key="sb_logout"):
+                LoginManager.logout()
+                for k in ("excel_files","index_data","search_results",
+                          "last_index_time","loaded_files_count","last_file_count"):
+                    st.session_state.pop(k, None)
+                st.rerun()
 
         # ── Trigger search dari Image Search ─────────────────────────
         # Trigger di-handle di dalam render_search_image_tab() sendiri agar
@@ -3366,9 +4113,6 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
 
         # ── TABS ────────────────────────────────────────────────────
         st.markdown(TAB_PERSIST_JS, unsafe_allow_html=True)
-        st.markdown('<div class="search-box">', unsafe_allow_html=True)
-        st.markdown('<h3 class="sub-header">🔎 Pencarian</h3>', unsafe_allow_html=True)
-
         # Definisi semua tab dan method render-nya
         ALL_TAB_DEFS = [
             ("tab_search_pn",    "🔢 Search Part Number", "_render_tab_search_pn"),
@@ -3415,7 +4159,6 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 else:
                     getattr(self, fn)()
 
-        st.markdown("</div>", unsafe_allow_html=True)
         self.display_search_results()
 
     def display_search_results(self):
@@ -3424,10 +4167,26 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             user = LoginManager.get_current_user()
             role = user["role"] if user else "user"
             allowed_cols = get_allowed_columns(user["username"], role)
+            search_term = st.session_state.get("search_term", "")
 
-            st.markdown("---")
-            st.markdown(f'<h3 class="sub-header">📋 Hasil Pencarian ({len(results)} ditemukan)</h3>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                '<div style="margin: 1.25rem 0 .5rem; padding-top: 1rem; '
+                'border-top: 1px solid var(--mp-line);"></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;'
+                f'margin-bottom:10px;">'
+                f'<span style="font-size:15px;font-weight:700;letter-spacing:-.01em;'
+                f'color:var(--mp-ink);">📋 Hasil Pencarian</span>'
+                f'<span class="mp-chip" style="font-family:var(--mp-font-mono);">'
+                f'{len(results)} ditemukan</span>'
+                f'<span style="font-size:12px;color:var(--mp-ink-50);">untuk</span>'
+                f'<span class="mp-chip gray" style="font-family:var(--mp-font-mono);">'
+                f'{search_term}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
             df_res = pd.DataFrame(results)
             # Daftar kolom yang ingin ditampilkan, filter Stok/Harga sesuai izin
             candidate_cols = ["File", "Part Number", "Part Name", "Quantity"]
@@ -3451,7 +4210,11 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             st.dataframe(df_res[cols], hide_index=True,
                          column_config={k: v for k, v in col_cfg.items() if k in cols})
             if st.session_state.get("search_type") == "Part Number":
-                st.markdown("### 🖼️ Gambar Part")
+                st.markdown(
+                    '<div style="margin:1rem 0 .5rem;font-size:14px;font-weight:700;'
+                    'letter-spacing:-.01em;color:var(--mp-ink);">🖼️ Gambar Part</div>',
+                    unsafe_allow_html=True,
+                )
                 for pn in df_res["Part Number"].dropna().unique():
                     rows     = df_res[df_res["Part Number"] == pn]
                     pname_ex = rows.iloc[0]["Part Name"] if not rows.empty else "N/A"
@@ -3654,7 +4417,11 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 if img_path and not img_path.exists():
                     img_path = None
 
-                st.markdown("### 🖼️ Gambar Part")
+                st.markdown(
+                    '<div style="margin:1rem 0 .5rem;font-size:14px;font-weight:700;'
+                    'letter-spacing:-.01em;color:var(--mp-ink);">🖼️ Gambar Part</div>',
+                    unsafe_allow_html=True,
+                )
                 with st.expander(f"🖼️ {search_term}", expanded=True):
                     if SIMS_ENABLED:
                         col_ref, _ = st.columns([1, 4])

@@ -1,0 +1,11 @@
+[theme]
+# MasPart brand — putih bersih + green #028912
+base                     = "light"
+primaryColor             = "#028912"
+backgroundColor          = "#FFFFFF"
+secondaryBackgroundColor = "#F7F8F5"
+textColor                = "#0F1A12"
+font                     = "sans serif"
+
+[server]
+runOnSave = true
