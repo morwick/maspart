@@ -198,7 +198,16 @@ def _save_metadata(pn: str, file_name: str, storage_path: str,
             },
             timeout=15,
         )
-        return resp.status_code in (200, 201, 204)
+        ok = resp.status_code in (200, 201, 204)
+        if ok and uploaded_by:
+            try:
+                from user_monitoring import log_activity
+                log_activity(uploaded_by, "upload_foto",
+                             target=pn.strip().upper(),
+                             details={"file_name": file_name, "size_bytes": int(file_size)})
+            except Exception:
+                pass
+        return ok
     except Exception as e:
         print(f"[foto_part] ❌ save_metadata: {e}")
         return False

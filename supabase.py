@@ -260,6 +260,30 @@ def load_users_from_supabase(force: bool = False) -> pd.DataFrame:
     return pd.DataFrame(columns=cols)
 
 
+def _username_status(uname: str) -> str:
+    """
+    Cek keberadaan username tanpa filter is_active.
+    Return: 'unknown' | 'inactive' | 'active' (untuk pelaporan login_history).
+    """
+    if not _is_configured() or not uname:
+        return "unknown"
+    try:
+        resp = requests.get(
+            _rest_url(_get_config()["table"]),
+            headers={**_headers(), "Accept": "application/json"},
+            params={"select": "username,is_active", "username": f"eq.{uname}"},
+            timeout=_AUTH_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            rows = resp.json() or []
+            if not rows:
+                return "unknown"
+            return "active" if bool(rows[0].get("is_active", True)) else "inactive"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def authenticate_from_supabase(username: str, password: str) -> Optional[dict]:
     """
     Verifikasi username + password dari Supabase.
@@ -267,16 +291,33 @@ def authenticate_from_supabase(username: str, password: str) -> Optional[dict]:
       1. password_hash (bcrypt) — kolom utama
       2. password plaintext     — fallback legacy (akan di-upgrade ke hash)
     Return dict user atau None.
+
+    Catatan: setiap percobaan login (sukses/gagal) di-log ke tabel login_history
+    via user_monitoring.log_login() — fail-silently.
     """
     if not username or not password:
         return None
+
+    # Import lazy supaya tidak ada circular import (user_monitoring import supabase).
+    try:
+        from user_monitoring import log_login, log_activity, get_client_context
+    except Exception:
+        log_login = None
+        log_activity = None
+        get_client_context = lambda: (None, None)  # noqa: E731
+
+    ip, ua = get_client_context()
 
     df    = load_users_from_supabase()
     uname = username.strip().lower()
     row   = df[df["username"] == uname]
 
     if row.empty:
-        print(f"[supabase] User '{uname}' tidak ditemukan.")
+        status = _username_status(uname)
+        reason = "inactive" if status == "inactive" else "unknown_user"
+        print(f"[supabase] User '{uname}' {status}.")
+        if log_login:
+            log_login(uname, success=False, reason=reason, ip_address=ip, user_agent=ua)
         return None
 
     stored_hash = str(row.iloc[0].get("password_hash", "") or "")
@@ -295,6 +336,11 @@ def authenticate_from_supabase(username: str, password: str) -> Optional[dict]:
                 if ok:
                     print(f"[supabase] 🔐 Hash password di-upgrade utk '{uname}'.")
 
+        if log_login:
+            log_login(uname, success=True, reason="ok", ip_address=ip, user_agent=ua)
+        if log_activity:
+            log_activity(uname, "login")
+
         return {
             "username":    uname,
             "role":        row.iloc[0]["role"],
@@ -303,6 +349,8 @@ def authenticate_from_supabase(username: str, password: str) -> Optional[dict]:
         }
 
     print(f"[supabase] ❌ Password salah: {uname}")
+    if log_login:
+        log_login(uname, success=False, reason="bad_password", ip_address=ip, user_agent=ua)
     return None
 
 

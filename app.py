@@ -39,6 +39,24 @@ except ImportError:
     render_user_management_tab = None
     SupabasePermissions        = None
 
+# ── User Monitoring (logging + dashboard) ────────────────────────────
+try:
+    from user_monitoring import (
+        log_activity,
+        touch_active,
+        render_user_monitoring_tab,
+    )
+    USER_MONITORING_ENABLED = True
+except Exception:
+    USER_MONITORING_ENABLED = False
+    def log_activity(*_a, **_kw): pass
+    def touch_active(*_a, **_kw): pass
+    def render_user_monitoring_tab():
+        try:
+            st.warning("⚠️ Modul `user_monitoring.py` tidak ditemukan.")
+        except Exception:
+            pass
+
 # ── Admin Foto Part ──────────────────────────────────────────────────
 try:
     from admin_foto_part import render_foto_part_tab, get_supabase_photo_urls
@@ -457,7 +475,8 @@ def get_allowed_tabs(username: str, role: str) -> list:
     """Admin selalu dapat semua tab. User lain sesuai konfigurasi."""
     if role == "admin":
         return list(ALL_MENU_TABS.keys()) + [
-            "tab_menu_control", "tab_data_upload", "tab_foto_part", "tab_image_index"
+            "tab_menu_control", "tab_data_upload", "tab_foto_part", "tab_image_index",
+            "tab_user_mgmt", "tab_user_monitoring",
         ]
     return MenuAccessManager.get_user_tabs(username)
 
@@ -682,6 +701,17 @@ def render_admin_menu_control_tab():
                         SupabasePermissions.invalidate(PERM_HARGA)
                     except Exception:
                         pass
+                try:
+                    _admin = LoginManager.get_current_user() or {}
+                    log_activity(_admin.get("username", ""), "permission_change",
+                                 target="__default__" if is_default_mode else target,
+                                 details={
+                                     "menu_tabs":     new_selection,
+                                     "columns":       new_col_sel,
+                                     "harga_subtabs": new_hs_sel,
+                                 })
+                except Exception:
+                    pass
                 st.success(f"✅ Akses untuk **{target_label}** disimpan.")
                 st.rerun()
             else:
@@ -1037,14 +1067,26 @@ class LoginManager:
             return False
         elapsed = (datetime.now() - user["last_active"]).total_seconds() / 60
         if elapsed > SESSION_TIMEOUT_MINUTES:
-            LoginManager.logout()
+            LoginManager.logout(reason="session_expired")
             st.session_state["login_error"] = "⏰ Sesi telah berakhir. Silakan login ulang."
             return False
         user["last_active"] = datetime.now()
+        # Refresh online status (throttled di dalam helper).
+        try:
+            touch_active(user.get("username", ""))
+        except Exception:
+            pass
         return True
 
     @staticmethod
-    def logout():
+    def logout(reason: str = "manual"):
+        user = st.session_state.get("current_user") or {}
+        uname = user.get("username", "")
+        if uname:
+            try:
+                log_activity(uname, "logout", details={"reason": reason})
+            except Exception:
+                pass
         st.session_state["is_logged_in"] = False
         st.session_state["current_user"] = None
 
@@ -1847,6 +1889,10 @@ class ExcelSearchApp:
                             sn_input, st.session_state.excel_files, self.stok_cache, self.harga_lookup)
                         st.session_state.search_type = "Part Number"
                         st.session_state.search_term = sn_input
+                        _u = LoginManager.get_current_user() or {}
+                        log_activity(_u.get("username", ""), "search_pn",
+                                     target=sn_input,
+                                     details={"results": len(st.session_state.search_results or [])})
                         st.rerun()
                 else:
                     st.warning("Masukkan part number untuk mencari.")
@@ -1866,6 +1912,10 @@ class ExcelSearchApp:
                             name_input, st.session_state.excel_files, self.stok_cache, self.harga_lookup)
                         st.session_state.search_type = "Part Name"
                         st.session_state.search_term = name_input
+                        _u = LoginManager.get_current_user() or {}
+                        log_activity(_u.get("username", ""), "search_name",
+                                     target=name_input,
+                                     details={"results": len(st.session_state.search_results or [])})
                         st.rerun()
                 else:
                     st.warning("Masukkan nama part untuk mencari.")
@@ -3337,6 +3387,8 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             ALL_TAB_DEFS.append(("tab_image_index",  "🧠 Image Index",     "__image_index__"))
             if SUPABASE_ENABLED and render_user_management_tab is not None:
                 ALL_TAB_DEFS.append(("tab_user_mgmt", "👥 User Management", "__user_mgmt__"))
+            if USER_MONITORING_ENABLED:
+                ALL_TAB_DEFS.append(("tab_user_monitoring", "📊 Monitoring User", "__user_monitoring__"))
 
         # Tentukan tab yang boleh dilihat user ini
         allowed_keys = set(get_allowed_tabs(user["username"], role))
@@ -3358,6 +3410,8 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                     render_image_index_tab()
                 elif fn == "__user_mgmt__":
                     render_user_management_tab()
+                elif fn == "__user_monitoring__":
+                    render_user_monitoring_tab()
                 else:
                     getattr(self, fn)()
 

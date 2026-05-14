@@ -188,8 +188,19 @@ def load_draft(username: str) -> Optional[Dict]:
 def save_draft(username: str, session: Dict) -> Tuple[bool, Optional[str]]:
     session["updated_at"] = datetime.now().isoformat(timespec="seconds")
     if _use_supabase():
-        return _SupaOpname.save_draft(username, session)
-    return _save_draft_file(username, session)
+        ok, err = _SupaOpname.save_draft(username, session)
+    else:
+        ok, err = _save_draft_file(username, session)
+    if ok:
+        try:
+            from user_monitoring import log_activity
+            n_rows = len((session.get("items") or {}))
+            log_activity(username, "edit_opname",
+                         target=session.get("session_id"),
+                         details={"draft": True, "rows": n_rows})
+        except Exception:
+            pass
+    return ok, err
 
 
 def delete_draft(username: str) -> bool:
@@ -213,16 +224,24 @@ def finalize_session(username: str, session: Dict) -> Tuple[bool, Optional[str]]
     session["summary"]      = summarize(session)
 
     if _use_supabase():
-        return _SupaOpname.finalize(username, session)
+        ok, err = _SupaOpname.finalize(username, session)
+    else:
+        history = _load_history_file(username)
+        history.insert(0, session)
+        ok, err = _save_history_file(username, history)
+        if ok:
+            _delete_draft_file(username)
 
-    # File fallback
-    history = _load_history_file(username)
-    history.insert(0, session)
-    ok, err = _save_history_file(username, history)
-    if not ok:
-        return False, err
-    _delete_draft_file(username)
-    return True, None
+    if ok:
+        try:
+            from user_monitoring import log_activity
+            n_rows = len((session.get("items") or {}))
+            log_activity(username, "edit_opname",
+                         target=session.get("session_id"),
+                         details={"finalized": True, "rows": n_rows})
+        except Exception:
+            pass
+    return ok, err
 
 
 def delete_history_entry(username: str, session_id: str) -> bool:

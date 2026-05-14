@@ -117,6 +117,24 @@ def _storage_headers(content_type: str = "application/octet-stream",
 #  CORE: UPLOAD / DOWNLOAD / INFO
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _log_upload(key: str, remote_path: str, size_bytes: int) -> None:
+    """Catat upload dataset ke user_activity (fail-silently)."""
+    try:
+        from user_monitoring import log_activity
+        try:
+            import streamlit as _st
+            user = _st.session_state.get("current_user") or {}
+            uname = user.get("username", "")
+        except Exception:
+            uname = ""
+        if uname:
+            log_activity(uname, "upload_data",
+                         target=remote_path,
+                         details={"dataset": key, "size_bytes": int(size_bytes)})
+    except Exception:
+        pass
+
+
 def upload_dataset(key: str, file_bytes: bytes) -> tuple[bool, str]:
     """Upload file dataset ke Supabase Storage (replace via PUT, fallback POST)."""
     if key not in DATASETS:
@@ -139,12 +157,14 @@ def upload_dataset(key: str, file_bytes: bytes) -> tuple[bool, str]:
 
         if resp.status_code in (200, 201):
             verb = "diperbarui" if exists else "diunggah"
+            _log_upload(key, ds["remote_path"], len(file_bytes))
             return True, f"`{ds['remote_path']}` berhasil {verb} ke bucket `{ds['bucket']}`."
 
         # Fallback: kalau PUT gagal coba POST
         if exists:
             resp2 = requests.post(url, headers=headers, data=file_bytes, timeout=60)
             if resp2.status_code in (200, 201):
+                _log_upload(key, ds["remote_path"], len(file_bytes))
                 return True, f"`{ds['remote_path']}` berhasil diunggah ke bucket `{ds['bucket']}`."
             return False, f"Upload gagal: {resp2.status_code} — {resp2.text[:200]}"
 
