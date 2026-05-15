@@ -39,6 +39,7 @@ import re
 import time
 import hashlib
 import threading
+from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -1328,6 +1329,11 @@ def get_index_stats() -> dict:
 _SS_QUERY_BYTES   = "_img_search_query_bytes"
 _SS_QUERY_NAME    = "_img_search_query_name"
 _SS_RESULTS       = "_img_search_results"
+# Track file_id terakhir yang sudah diproses per source — supaya block upload
+# dan kamera tidak saling overwrite query state di setiap rerun.
+_SS_PROCESSED_UPLOAD = "_img_search_processed_upload_id"
+_SS_PROCESSED_CAMERA = "_img_search_processed_camera_id"
+_SS_ACTIVE_SOURCE    = "_img_search_active_source"  # "upload" | "camera"
 
 
 def _clear_global_pn_results() -> None:
@@ -1480,25 +1486,69 @@ def render_search_image_tab():
         col_upload, col_preview = st.columns([3, 2], gap="medium")
 
         with col_upload:
-            uploaded = st.file_uploader(
-                "📤 **Upload atau drag-drop foto part di sini**",
-                type=["jpg", "jpeg", "png", "webp"],
-                key="img_search_uploader",
-                help="Format didukung: JPG, JPEG, PNG, WEBP. Max 200 MB.",
-                on_change=_on_query_file_change,
+            # Sub-tabs: pilih sumber foto (Upload file vs Kamera langsung).
+            # Kamera berguna untuk mekanik lapangan yang akses lewat HP —
+            # langsung jepret part tanpa simpan ke galeri dulu.
+            src_tab_upload, src_tab_camera = st.tabs(
+                ["📤 Upload File", "📷 Kamera"]
             )
 
-            if uploaded is not None:
-                raw_bytes = uploaded.read()
-                ok, err   = _validate_query_image(raw_bytes, uploaded.name)
-                if not ok:
-                    st.error(f"❌ {err}")
-                    st.session_state.pop(_SS_QUERY_BYTES, None)
-                    st.session_state.pop(_SS_QUERY_NAME,  None)
-                    st.session_state.pop(_SS_RESULTS,     None)
-                else:
-                    st.session_state[_SS_QUERY_BYTES] = raw_bytes
-                    st.session_state[_SS_QUERY_NAME]  = uploaded.name
+            with src_tab_upload:
+                uploaded = st.file_uploader(
+                    "Upload atau drag-drop foto part di sini",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="img_search_uploader",
+                    help="Format didukung: JPG, JPEG, PNG, WEBP. Max 200 MB.",
+                    on_change=_on_query_file_change,
+                    label_visibility="collapsed",
+                )
+
+                if uploaded is not None:
+                    up_id = getattr(uploaded, "file_id", None) or uploaded.name
+                    if st.session_state.get(_SS_PROCESSED_UPLOAD) != up_id:
+                        raw_bytes = uploaded.getvalue()
+                        ok, err   = _validate_query_image(raw_bytes, uploaded.name)
+                        if not ok:
+                            st.error(f"❌ {err}")
+                            st.session_state.pop(_SS_QUERY_BYTES, None)
+                            st.session_state.pop(_SS_QUERY_NAME,  None)
+                            st.session_state.pop(_SS_RESULTS,     None)
+                        else:
+                            st.session_state[_SS_QUERY_BYTES]    = raw_bytes
+                            st.session_state[_SS_QUERY_NAME]     = uploaded.name
+                            st.session_state[_SS_ACTIVE_SOURCE]  = "upload"
+                        st.session_state[_SS_PROCESSED_UPLOAD] = up_id
+
+            with src_tab_camera:
+                st.caption(
+                    "Izinkan akses kamera di browser. Di HP, browser biasanya "
+                    "pakai kamera belakang — paling cocok untuk foto part."
+                )
+                captured = st.camera_input(
+                    "Ambil foto part",
+                    key="img_search_camera",
+                    on_change=_on_query_file_change,
+                    label_visibility="collapsed",
+                )
+
+                if captured is not None:
+                    cam_id = getattr(captured, "file_id", None) or "camera_capture"
+                    if st.session_state.get(_SS_PROCESSED_CAMERA) != cam_id:
+                        raw_bytes = captured.getvalue()
+                        # Kamera selalu PNG dari browser; tetap validasi defensif
+                        # karena bisa juga gagal di resolusi rendah / lensa tertutup.
+                        ok, err   = _validate_query_image(raw_bytes, "camera.png")
+                        if not ok:
+                            st.error(f"❌ {err}")
+                            st.session_state.pop(_SS_QUERY_BYTES, None)
+                            st.session_state.pop(_SS_QUERY_NAME,  None)
+                            st.session_state.pop(_SS_RESULTS,     None)
+                        else:
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            st.session_state[_SS_QUERY_BYTES]   = raw_bytes
+                            st.session_state[_SS_QUERY_NAME]    = f"camera_{ts}.png"
+                            st.session_state[_SS_ACTIVE_SOURCE] = "camera"
+                        st.session_state[_SS_PROCESSED_CAMERA] = cam_id
 
             q_bytes_check = st.session_state.get(_SS_QUERY_BYTES)
 
@@ -1517,9 +1567,13 @@ def render_search_image_tab():
                     key="btn_img_clear",
                     help="Reset — hapus foto & hasil",
                 ):
-                    st.session_state.pop(_SS_QUERY_BYTES, None)
-                    st.session_state.pop(_SS_QUERY_NAME,  None)
-                    st.session_state.pop(_SS_RESULTS,     None)
+                    for k in (
+                        _SS_QUERY_BYTES, _SS_QUERY_NAME, _SS_RESULTS,
+                        _SS_PROCESSED_UPLOAD, _SS_PROCESSED_CAMERA,
+                        _SS_ACTIVE_SOURCE,
+                        "img_search_uploader", "img_search_camera",
+                    ):
+                        st.session_state.pop(k, None)
                     _clear_global_pn_results()
                     st.rerun()
 
@@ -1552,12 +1606,17 @@ def render_search_image_tab():
         with col_preview:
             q_bytes = st.session_state.get(_SS_QUERY_BYTES)
             q_name  = st.session_state.get(_SS_QUERY_NAME, "")
+            q_src   = st.session_state.get(_SS_ACTIVE_SOURCE, "")
             if q_bytes:
-                size_kb = len(q_bytes) / 1024
+                size_kb   = len(q_bytes) / 1024
+                src_icon  = "📷" if q_src == "camera" else "📤"
+                src_label = "Dari kamera" if q_src == "camera" else "Dari file"
                 st.markdown(
                     f"""
                     <div style="font-size:13px; font-weight:600; margin-bottom:4px;">
                       📸 Preview foto query
+                      <span style="font-weight:500; color:#6b7280; font-size:11px;
+                                   margin-left:6px;">{src_icon} {src_label}</span>
                     </div>
                     <div style="color:#6b7280; font-size:11px; margin-bottom:4px;
                                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
