@@ -1936,6 +1936,50 @@ def make_template_excel() -> bytes:
     return buf.getvalue()
 
 
+# ── Shared Excel Index (cross-session, RAM-efficient) ───────────────
+# Sebelum-nya index 421 file Excel disimpan di st.session_state PER user
+# (~500 MB/user) → 2–3 user concurrent langsung kena resource limit
+# Streamlit Cloud (~1 GB). @st.cache_resource simpan 1 copy di proses
+# yang dishare ke semua session. RAM cuma sekali untuk semua user.
+@st.cache_resource(
+    show_spinner="📚 Memuat index Excel (sekali saja, di-share ke semua user)..."
+)
+def _load_excel_index_shared(data_folder_str: str, _processor):
+    """
+    Walk data folder, parse semua .xlsx/.xls/.xlsm, return list entry per
+    sheet. Cached antar session — re-run cuma terjadi kalau cache di-clear
+    (mis. lewat tombol Refresh Data).
+
+    Parameter `_processor` di-prefix underscore supaya Streamlit skip dari
+    hashing key (callable tidak bisa di-hash konsisten). Cache key efektif
+    cuma `data_folder_str`.
+    """
+    data_folder = Path(data_folder_str)
+    excel_ext = (".xlsx", ".xls", ".xlsm")
+    all_files = []
+    for root, _, files in os.walk(data_folder):
+        for f in files:
+            if f.lower().endswith(excel_ext):
+                fp = Path(root) / f
+                all_files.append((fp, fp.relative_to(data_folder)))
+
+    if not all_files:
+        return [], 0, datetime.now()
+
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(_processor, fp, rp): fp for fp, rp in all_files}
+        for future in as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    results.extend(res)
+            except Exception:
+                pass
+
+    return results, len(all_files), datetime.now()
+
+
 # ── Main App ────────────────────────────────────────────────────────
 class ExcelSearchApp:
     def __init__(self):
@@ -1964,7 +2008,16 @@ class ExcelSearchApp:
             st.session_state.file_hashes        = {}
 
         if not st.session_state.excel_files:
-            self.auto_load_excel_files()
+            # Ambil dari shared cache_resource — bukan reload per session.
+            # st.session_state.excel_files menyimpan REFERENCE ke list yang
+            # sama untuk semua user → 1 copy di RAM, bukan N copy.
+            results, n_total_files, idx_time = _load_excel_index_shared(
+                str(self.data_folder), self.process_single_file
+            )
+            st.session_state.excel_files        = results
+            st.session_state.loaded_files_count = len(results)
+            st.session_state.last_file_count    = n_total_files
+            st.session_state.last_index_time    = idx_time
 
     def create_data_folder(self):
         if not self.data_folder.exists():
@@ -2391,35 +2444,23 @@ class ExcelSearchApp:
         return results
 
     def auto_load_excel_files(self):
+        """
+        Force-reload Excel index. Dipakai oleh tombol "🔄 Refresh Data" di
+        sidebar — clear shared cache lalu re-walk + re-parse folder data.
+        Path normal (init session baru) TIDAK lewat sini; langsung pakai
+        `_load_excel_index_shared(...)` di __init__.
+        """
         try:
             self.create_data_folder()
-            excel_ext = (".xlsx", ".xls", ".xlsm")
-            all_files = []
-            for root, _, files in os.walk(self.data_folder):
-                for f in files:
-                    if f.lower().endswith(excel_ext):
-                        fp = Path(root) / f
-                        all_files.append((fp, fp.relative_to(self.data_folder)))
-
-            if not all_files:
-                return
-
-            results = []
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(self.process_single_file, fp, rp): fp
-                           for fp, rp in all_files}
-                for future in as_completed(futures):
-                    try:
-                        res = future.result()
-                        if res:
-                            results.extend(res)
-                    except Exception:
-                        pass
-
+            # Bust cache_resource supaya next call benar-benar walk lagi
+            _load_excel_index_shared.clear()
+            results, n_total_files, idx_time = _load_excel_index_shared(
+                str(self.data_folder), self.process_single_file
+            )
             st.session_state.excel_files        = results
-            st.session_state.last_index_time    = datetime.now()
+            st.session_state.last_index_time    = idx_time
             st.session_state.loaded_files_count = len(results)
-            st.session_state.last_file_count    = len(all_files)
+            st.session_state.last_file_count    = n_total_files
         except Exception as e:
             st.error(f"Error loading Excel files: {e}")
 
