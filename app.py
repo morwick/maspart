@@ -1533,6 +1533,33 @@ class LoginManager:
         st.session_state["is_logged_in"] = False
         st.session_state["current_user"] = None
 
+        # Cleanup session_state besar supaya RAM langsung dibebasin saat
+        # logout (bukan nunggu Streamlit GC session). Reference ke shared
+        # cache (excel_files) putus → data shared TETAP hidup di
+        # _load_excel_index_shared untuk user lain.
+        STATIC_KEYS = (
+            "excel_files", "index_data", "search_results",
+            "harga_data", "harga_lookup", "stok_data",
+            "last_index_time", "loaded_files_count", "last_file_count",
+            "file_hashes", "search_type", "search_term",
+            "_pn_scroll_to_image", "_img_idx_results_ts",
+        )
+        for k in STATIC_KEYS:
+            st.session_state.pop(k, None)
+
+        # Pattern-based keys (dynamic — di-keyed by PN / sub-feature).
+        # Hindari ngutak-atik widget key (login form, dll) — cek di awal
+        # supaya safe.
+        DYNAMIC_PREFIXES = (
+            "sims_fetched_", "sims_err_", "sims_part_info_",
+            "img_idx_", "local_img_idx_",
+            "_img_search_",
+            "bhe_",
+        )
+        for k in list(st.session_state.keys()):
+            if any(k.startswith(p) for p in DYNAMIC_PREFIXES):
+                st.session_state.pop(k, None)
+
     @staticmethod
     def get_current_user():
         return st.session_state.get("current_user")
@@ -1980,6 +2007,32 @@ def _load_excel_index_shared(data_folder_str: str, _processor):
     return results, len(all_files), datetime.now()
 
 
+# ── Pickle disk cache size limit (LRU eviction) ─────────────────────
+# Streamlit Cloud free tier punya disk ~1 GB share dengan kode + deps +
+# image cache. Tanpa cap, pickle cache bisa tumbuh tak terbatas (orphan
+# kalau Excel sumber dihapus). Helper di bawah ini menjaga total size
+# `.cache/*.pkl` di bawah cap dengan eviction LRU (by mtime).
+_PICKLE_CACHE_MAX_MB = 500
+
+def _enforce_pickle_cache_size_limit(max_mb: int = _PICKLE_CACHE_MAX_MB) -> None:
+    try:
+        files = sorted(
+            CACHE_FOLDER.glob("*.pkl"), key=lambda f: f.stat().st_mtime
+        )
+        total = sum(f.stat().st_size for f in files)
+        cap = max_mb * 1024 * 1024
+        while total > cap and files:
+            old = files.pop(0)
+            try:
+                sz = old.stat().st_size
+                old.unlink()
+                total -= sz
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 # ── Main App ────────────────────────────────────────────────────────
 class ExcelSearchApp:
     def __init__(self):
@@ -1999,25 +2052,26 @@ class ExcelSearchApp:
         self._load_harga_data()
 
         if "excel_files" not in st.session_state:
-            st.session_state.excel_files        = []
             st.session_state.index_data         = []
-            st.session_state.last_index_time    = None
             st.session_state.search_results     = []
-            st.session_state.loaded_files_count = 0
-            st.session_state.last_file_count    = 0
             st.session_state.file_hashes        = {}
 
-        if not st.session_state.excel_files:
-            # Ambil dari shared cache_resource — bukan reload per session.
-            # st.session_state.excel_files menyimpan REFERENCE ke list yang
-            # sama untuk semua user → 1 copy di RAM, bukan N copy.
-            results, n_total_files, idx_time = _load_excel_index_shared(
-                str(self.data_folder), self.process_single_file
-            )
-            st.session_state.excel_files        = results
-            st.session_state.loaded_files_count = len(results)
-            st.session_state.last_file_count    = n_total_files
-            st.session_state.last_index_time    = idx_time
+        # SELALU overwrite excel_files dengan reference dari shared cache —
+        # bukan conditional. Alasan:
+        #   1. Cache_resource memang sudah men-dedup load (cache hit = return
+        #      reference, biaya ~zero).
+        #   2. Kalau session_state.excel_files masih nyimpan copy besar dari
+        #      deploy sebelumnya (sebelum refactor ini), conditional skip
+        #      bakal nahan stale copy itu di RAM. Assign unconditional bikin
+        #      Python GC bebasin copy lama begitu reference terakhir hilang.
+        # Semua user end up share 1 list yang sama di RAM.
+        results, n_total_files, idx_time = _load_excel_index_shared(
+            str(self.data_folder), self.process_single_file
+        )
+        st.session_state.excel_files        = results
+        st.session_state.loaded_files_count = len(results)
+        st.session_state.last_file_count    = n_total_files
+        st.session_state.last_index_time    = idx_time
 
     def create_data_folder(self):
         if not self.data_folder.exists():
@@ -2043,7 +2097,10 @@ class ExcelSearchApp:
     def save_file_cache(self, fp, fh, data):
         try:
             with open(self.cache_folder / f"{fh}.pkl", "wb") as f:
-                pickle.dump(data, f)
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # Setelah tiap save, cek total cache size — evict yang paling tua
+            # kalau lewat cap. Hindari disk full di Streamlit Cloud.
+            _enforce_pickle_cache_size_limit()
         except Exception:
             pass
 
@@ -2137,7 +2194,15 @@ class ExcelSearchApp:
 </div>""", unsafe_allow_html=True)
 
     @staticmethod
+    @st.cache_data(ttl=1800, max_entries=200, show_spinner=False)
     def fetch_image_bytes(url: str):
+        """
+        Download image bytes dari URL (SIMS / Supabase / public).
+        Hasil di-cache 30 menit (TTL=1800s, max 200 URL distinct).
+        Tanpa cache, setiap rerun (klik tombol, ganti tab) re-download
+        gambar yang sama → boros bandwidth + latency. Cache_data evict
+        otomatis kalau lewat max_entries.
+        """
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
             if SIMS_ENABLED:
@@ -2249,7 +2314,19 @@ class ExcelSearchApp:
             return
 
         try:
-            df_h = pd.read_excel(io.BytesIO(file_bytes), dtype=str)
+            # Filter usecols supaya hanya kolom relevan (PN/Name/Harga) yang
+            # di-load ke RAM. harga.xlsx user biasanya punya banyak kolom
+            # tambahan (kategori, supplier, dll) yang tidak dipakai.
+            def _is_useful_col(name) -> bool:
+                cl = str(name).strip().lower()
+                return any(kw in cl for kw in (
+                    "part number", "partnumber", "no part", "kode",
+                    "part name", "nama", "deskripsi",
+                    "harga", "price",
+                ))
+            df_h = pd.read_excel(
+                io.BytesIO(file_bytes), dtype=str, usecols=_is_useful_col
+            )
             df_h.columns = [c.strip() for c in df_h.columns]
             col_map = {}
             for c in df_h.columns:
@@ -2330,33 +2407,42 @@ class ExcelSearchApp:
                     key="harga_sort",
                 )
 
-        df_show = df_h.copy()
-
+        # df_show: filter dulu (return view/new), lalu sort. Tanpa .copy()
+        # awal — df_h tidak di-mutate karena semua langkah berikut return
+        # DataFrame baru (boolean filter, sort_values, dst).
         if kw_harga.strip():
             kw_up = kw_harga.strip().upper()
             mask = (
-                df_show["Part Number"].str.upper().str.contains(kw_up, na=False) |
-                df_show["Part Name"].astype(str).str.upper().str.contains(kw_up, na=False)
+                df_h["Part Number"].str.upper().str.contains(kw_up, na=False) |
+                df_h["Part Name"].astype(str).str.upper().str.contains(kw_up, na=False)
             )
-            df_show = df_show[mask].reset_index(drop=True)
+            df_show = df_h[mask].reset_index(drop=True)
+        else:
+            df_show = df_h
+
+        def _harga_sort_key(s):
+            return pd.to_numeric(
+                s.astype(str).str.replace(r"[^\d.]", "", regex=True),
+                errors="coerce",
+            )
 
         try:
             if sort_by == "Harga (Terendah)":
-                df_show["_harga_num"] = pd.to_numeric(
-                    df_show["Harga"].astype(str).str.replace(r"[^\d.]", "", regex=True), errors="coerce")
-                df_show = df_show.sort_values("_harga_num", ascending=True).drop(columns=["_harga_num"])
+                df_show = df_show.sort_values(
+                    "Harga", key=_harga_sort_key, ascending=True
+                ).reset_index(drop=True)
             elif sort_by == "Harga (Tertinggi)":
-                df_show["_harga_num"] = pd.to_numeric(
-                    df_show["Harga"].astype(str).str.replace(r"[^\d.]", "", regex=True), errors="coerce")
-                df_show = df_show.sort_values("_harga_num", ascending=False).drop(columns=["_harga_num"])
+                df_show = df_show.sort_values(
+                    "Harga", key=_harga_sort_key, ascending=False
+                ).reset_index(drop=True)
             elif sort_by == "Part Name":
-                df_show = df_show.sort_values("Part Name", key=lambda x: x.str.upper())
+                df_show = df_show.sort_values(
+                    "Part Name", key=lambda x: x.str.upper()
+                ).reset_index(drop=True)
             else:
-                df_show = df_show.sort_values("Part Number")
+                df_show = df_show.sort_values("Part Number").reset_index(drop=True)
         except Exception:
             pass
-
-        df_show = df_show.reset_index(drop=True)
 
         c1, c2 = st.columns(2)
         c1.metric("Total Part", len(df_h))
@@ -2371,9 +2457,12 @@ class ExcelSearchApp:
             except Exception:
                 return str(val)
 
-        df_display = df_show[["Part Number", "Part Name", "Harga"]].copy()
-        df_display["Harga (Rp)"] = df_display["Harga"].apply(fmt_harga)
-        df_display = df_display.drop(columns=["Harga"])
+        # Construct df_display fresh — no .copy() needed.
+        df_display = pd.DataFrame({
+            "Part Number": df_show["Part Number"].to_numpy(),
+            "Part Name":   df_show["Part Name"].to_numpy(),
+            "Harga (Rp)":  df_show["Harga"].map(fmt_harga).to_numpy(),
+        })
 
         if df_display.empty:
             st.info("Tidak ada data yang cocok dengan pencarian.")
@@ -2417,16 +2506,41 @@ class ExcelSearchApp:
                 try:
                     df = pd.read_excel(xls, sheet_name=sheet_name, usecols=[1,3,4], dtype=str)
                     df.columns = ["part_number","part_name","quantity"]
-                    pn_idx, nm_idx = {}, {}
-                    for idx, row in df.iterrows():
-                        pn = str(row["part_number"]).strip().upper() if pd.notna(row["part_number"]) else ""
-                        nm = str(row["part_name"]).strip().upper()   if pd.notna(row["part_name"])   else ""
-                        if pn:
-                            pn_idx.setdefault(pn, []).append(idx)
-                        if nm:
-                            for word in nm.split():
-                                if len(word) > 2:
-                                    nm_idx.setdefault(word, []).append(idx)
+
+                    # Pre-normalize vectorized — 5–10× lebih cepat dari
+                    # iterrows + per-row str() pada 920k baris total.
+                    pn_series = (
+                        df["part_number"].fillna("").astype(str)
+                        .str.strip().str.upper()
+                    )
+                    nm_series = (
+                        df["part_name"].fillna("").astype(str)
+                        .str.strip().str.upper()
+                    )
+
+                    # pn_idx: dict[PN_upper, list[row_idx]]. Pakai groupby —
+                    # preserve order index per group dengan sort=False.
+                    pn_valid = pn_series[pn_series != ""]
+                    if len(pn_valid):
+                        pn_idx = (
+                            pn_valid.reset_index()
+                            .groupby("part_number", sort=False)["index"]
+                            .apply(list)
+                            .to_dict()
+                        )
+                    else:
+                        pn_idx = {}
+
+                    # nm_idx: per-row split tetap perlu loop (multi-key per row).
+                    # Pakai .items() pada Series (~itertuples speed) — masih
+                    # jauh lebih cepat dari iterrows + repeat str/strip/upper.
+                    nm_idx = {}
+                    for idx, nm in nm_series.items():
+                        if not nm:
+                            continue
+                        for word in nm.split():
+                            if len(word) > 2:
+                                nm_idx.setdefault(word, []).append(idx)
                     results.append({
                         "full_path": str(file_path), "file_name": file_name,
                         "relative_path": str(relative_path), "simple_name": simple_name,
@@ -2461,6 +2575,9 @@ class ExcelSearchApp:
             st.session_state.last_index_time    = idx_time
             st.session_state.loaded_files_count = len(results)
             st.session_state.last_file_count    = n_total_files
+            # Cleanup proaktif pickle cache (LRU) — handle orphan dari
+            # file Excel yang sudah dihapus.
+            _enforce_pickle_cache_size_limit()
         except Exception as e:
             st.error(f"Error loading Excel files: {e}")
 
@@ -3811,33 +3928,41 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                             key="harga_sort",
                         )
 
-                df_show = df_h.copy()
-
+                # df_show: filter → sort tanpa .copy() awal. df_h tidak
+                # di-mutate karena semua langkah return DataFrame baru.
                 if kw_harga.strip():
                     kw_up = kw_harga.strip().upper()
                     mask = (
-                        df_show["Part Number"].str.upper().str.contains(kw_up, na=False) |
-                        df_show["Part Name"].astype(str).str.upper().str.contains(kw_up, na=False)
+                        df_h["Part Number"].str.upper().str.contains(kw_up, na=False) |
+                        df_h["Part Name"].astype(str).str.upper().str.contains(kw_up, na=False)
                     )
-                    df_show = df_show[mask].reset_index(drop=True)
+                    df_show = df_h[mask].reset_index(drop=True)
+                else:
+                    df_show = df_h
+
+                def _harga_sort_key(s):
+                    return pd.to_numeric(
+                        s.astype(str).str.replace(r"[^\d.]", "", regex=True),
+                        errors="coerce",
+                    )
 
                 try:
                     if sort_by == "Harga (Terendah)":
-                        df_show["_harga_num"] = pd.to_numeric(
-                            df_show["Harga"].astype(str).str.replace(r"[^\d.]", "", regex=True), errors="coerce")
-                        df_show = df_show.sort_values("_harga_num", ascending=True).drop(columns=["_harga_num"])
+                        df_show = df_show.sort_values(
+                            "Harga", key=_harga_sort_key, ascending=True
+                        ).reset_index(drop=True)
                     elif sort_by == "Harga (Tertinggi)":
-                        df_show["_harga_num"] = pd.to_numeric(
-                            df_show["Harga"].astype(str).str.replace(r"[^\d.]", "", regex=True), errors="coerce")
-                        df_show = df_show.sort_values("_harga_num", ascending=False).drop(columns=["_harga_num"])
+                        df_show = df_show.sort_values(
+                            "Harga", key=_harga_sort_key, ascending=False
+                        ).reset_index(drop=True)
                     elif sort_by == "Part Name":
-                        df_show = df_show.sort_values("Part Name", key=lambda x: x.str.upper())
+                        df_show = df_show.sort_values(
+                            "Part Name", key=lambda x: x.str.upper()
+                        ).reset_index(drop=True)
                     else:
-                        df_show = df_show.sort_values("Part Number")
+                        df_show = df_show.sort_values("Part Number").reset_index(drop=True)
                 except Exception:
                     pass
-
-                df_show = df_show.reset_index(drop=True)
 
                 c1, c2 = st.columns(2)
                 c1.metric("Total Part", len(df_h))
@@ -3852,9 +3977,12 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                     except Exception:
                         return str(val)
 
-                df_display = df_show[["Part Number", "Part Name", "Harga"]].copy()
-                df_display["Harga (Rp)"] = df_display["Harga"].apply(fmt_harga)
-                df_display = df_display.drop(columns=["Harga"])
+                # Construct df_display fresh — no .copy() needed.
+                df_display = pd.DataFrame({
+                    "Part Number": df_show["Part Number"].to_numpy(),
+                    "Part Name":   df_show["Part Name"].to_numpy(),
+                    "Harga (Rp)":  df_show["Harga"].map(fmt_harga).to_numpy(),
+                })
 
                 if df_display.empty:
                     st.info("Tidak ada data yang cocok dengan pencarian.")

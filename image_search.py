@@ -88,12 +88,14 @@ EMBED_BATCH_SIZE  = 2                 # DINOv2 forward pass per batch (was 8)
 SIMS_CACHE_DIR    = Path("images/sims_cache")
 DOWNLOAD_RETRIES  = 1                 # 1 retry → max 2 attempt per URL
 
-# Cache size management
-CACHE_MAX_MB        = 500    # cap total cache (LRU eviction kalau lewat)
+# Cache size management — dituned untuk Streamlit Cloud free tier (~1 GB disk
+# total share dengan kode + deps + .cache pickle). 500 MB sebelumnya terlalu
+# agresif → cache bisa kepenuhan saat bulk indexing concurrent.
+CACHE_MAX_MB        = 200    # cap total cache (LRU eviction kalau lewat)
 CACHE_TARGET_RATIO  = 0.90   # cleanup turunkan ke 90% cap
 CACHE_THUMB_MAX_PX  = 512    # resize max dimension saat save ke cache
 CACHE_THUMB_QUALITY = 85     # WebP quality
-_CACHE_CLEANUP_EVERY = 50    # cek cleanup tiap N write
+_CACHE_CLEANUP_EVERY = 20    # cek cleanup tiap N write (lebih responsif)
 
 # Bulk hardening — supaya bulk PN banyak tidak gagal seluruhnya kalau ada hiccup
 BULK_UPSERT_CHUNK     = 50   # potong payload bulk upsert tiap N row (hindari body-too-large)
@@ -198,10 +200,17 @@ def _load_model():
 #  EMBEDDING
 # ══════════════════════════════════════════════════════════════════════════
 
+_EMBED_PRE_RESIZE_MAX = 1024   # cap dim sebelum DINOv2 transforms
+
+
 def compute_embedding(image_bytes: bytes) -> list[float]:
     """
     Hitung embedding vector (768 dim, L2-normalized) dari image bytes.
     L2 normalize → cosine distance = euclidean distance² / 2.
+
+    Pre-resize ke max 1024 px sebelum diserahkan ke `preprocess`. Foto HP
+    modern bisa 4000×3000 (~50–100 MB RAM peak saat decoded PIL).
+    DINOv2 input akhirnya 224×224 anyway, jadi 1024 cukup untuk feed quality.
     """
     if not _TORCH_AVAILABLE:
         raise RuntimeError(f"torch tidak tersedia: {_TORCH_ERR}")
@@ -210,6 +219,8 @@ def compute_embedding(image_bytes: bytes) -> list[float]:
 
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img).convert("RGB")
+    if max(img.size) > _EMBED_PRE_RESIZE_MAX:
+        img.thumbnail((_EMBED_PRE_RESIZE_MAX, _EMBED_PRE_RESIZE_MAX), Image.LANCZOS)
     tensor = preprocess(img).unsqueeze(0)   # [1, 3, H, W]
 
     with torch.no_grad():
@@ -237,6 +248,8 @@ def compute_embedding_tta(image_bytes: bytes) -> list[float]:
 
     img = Image.open(io.BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img).convert("RGB")
+    if max(img.size) > _EMBED_PRE_RESIZE_MAX:
+        img.thumbnail((_EMBED_PRE_RESIZE_MAX, _EMBED_PRE_RESIZE_MAX), Image.LANCZOS)
     img_flipped = ImageOps.mirror(img)
 
     tensor = torch.stack([preprocess(img), preprocess(img_flipped)])  # [2, 3, H, W]
@@ -1346,6 +1359,28 @@ def _clear_global_pn_results() -> None:
         st.session_state.pop(k, None)
 
 
+# Key state aktif yang TIDAK boleh dihapus oleh _clear_image_search_state.
+# Selain ini, semua `_img_search_*` boleh dihapus.
+_IMG_SEARCH_KEEP_KEYS = frozenset({
+    _SS_QUERY_BYTES, _SS_QUERY_NAME,
+    _SS_PROCESSED_UPLOAD, _SS_PROCESSED_CAMERA, _SS_ACTIVE_SOURCE,
+})
+
+
+def _clear_image_search_state() -> None:
+    """
+    Hapus semua session_state hasil image search lama
+    (`_img_search_fallback`, `_img_search_filter_reason`, dst) sebelum
+    set hasil baru — supaya state lama tidak ikut ke-snapshot kalau search
+    baru gagal di tengah jalan, dan tidak akumulasi 2–5 MB per session.
+
+    Keys aktif (query bytes/name/source tracking) dipertahankan.
+    """
+    for k in list(st.session_state.keys()):
+        if k.startswith("_img_search_") and k not in _IMG_SEARCH_KEEP_KEYS:
+            st.session_state.pop(k, None)
+
+
 def _on_query_file_change() -> None:
     """
     Callback file_uploader — dipanggil HANYA saat user benar-benar ganti
@@ -1733,6 +1768,9 @@ def render_search_image_tab():
         # Bersihkan hasil PN search lama (tabel di bawah tabs) supaya tidak
         # menggantung saat user run image search baru.
         _clear_global_pn_results()
+        # Bersihkan juga state image search lama (fallback, filter reason,
+        # ambiguous, dst) supaya tidak akumulasi antar pencarian.
+        _clear_image_search_state()
         with st.spinner("🔍 Menghitung embedding & mencari di database..."):
             t0 = time.time()
             # Ambil kandidat mentah tanpa threshold — biar smart filter

@@ -57,6 +57,13 @@ _SS_ERRORS      = "bhe_errors"         # int
 _SS_JOB_ID      = "bhe_job_id"         # str   — hash list PN aktif
 _SS_LAST_UPDATE = "bhe_last_update"    # float — timestamp terakhir update
 _SS_PN_ORDER    = "bhe_pn_order"       # list  — urutan asli PN dari input
+_SS_COMPLETED_AT = "bhe_completion_time"  # float — saat batch selesai (auto-clear setelah TTL)
+
+# Setelah batch selesai, hasil disimpan di session_state. Untuk hindari
+# numpuk RAM kalau user pindah tab dan tidak balik lagi, auto-clear
+# results setelah TTL. User masih bisa lihat hasil <TTL menit setelah
+# batch selesai sebelum di-bersihin.
+_BATCH_RESULT_TTL = 600   # 10 menit
 
 
 # ── Persistensi Progress ─────────────────────────────────────────────────────
@@ -199,6 +206,26 @@ def render_batch_harga_tab(b_rate: float | None = None):
         if key not in st.session_state:
             st.session_state[key] = default
 
+    # ── Auto-clear hasil lama setelah TTL ────────────────────────────────────
+    # Kalau batch sudah selesai >TTL detik yang lalu dan user tidak balik
+    # ke tab ini, bebasin RAM yang dipakai dict results.
+    completed_at = st.session_state.get(_SS_COMPLETED_AT, 0.0)
+    if (
+        completed_at
+        and (time.time() - completed_at) > _BATCH_RESULT_TTL
+        and not st.session_state.get(_SS_RUNNING, False)
+    ):
+        for key in (_SS_RESULTS, _SS_TOTAL, _SS_DONE, _SS_ERRORS,
+                    _SS_JOB_ID, _SS_PN_ORDER, _SS_COMPLETED_AT):
+            st.session_state.pop(key, None)
+        # Re-init defaults supaya UI tidak crash
+        st.session_state[_SS_RESULTS] = {}
+        st.session_state[_SS_TOTAL]   = 0
+        st.session_state[_SS_DONE]    = 0
+        st.session_state[_SS_ERRORS]  = 0
+        st.session_state[_SS_JOB_ID]  = ""
+        st.session_state[_SS_PN_ORDER] = []
+
     # ── Input ────────────────────────────────────────────────────────────────
     input_mode = st.radio(
         "Metode Input:",
@@ -290,7 +317,8 @@ def render_batch_harga_tab(b_rate: float | None = None):
     if reset_clicked:
         _clear_progress()
         for key in [_SS_RUNNING, _SS_STOP_FLAG, _SS_RESULTS, _SS_TOTAL,
-                    _SS_DONE, _SS_ERRORS, _SS_JOB_ID, _SS_LAST_UPDATE, _SS_PN_ORDER]:
+                    _SS_DONE, _SS_ERRORS, _SS_JOB_ID, _SS_LAST_UPDATE,
+                    _SS_PN_ORDER, _SS_COMPLETED_AT]:
             st.session_state.pop(key, None)
         st.session_state[_SS_RUNNING]  = False
         st.session_state[_SS_RESULTS]  = {}
@@ -334,6 +362,9 @@ def render_batch_harga_tab(b_rate: float | None = None):
         st.session_state[_SS_RUNNING]  = True
         st.session_state[_SS_STOP_FLAG] = False
         st.session_state[_SS_LAST_UPDATE] = time.time()
+        # Reset completion timestamp — supaya auto-clear tidak salah trigger
+        # selama batch baru ini jalan.
+        st.session_state.pop(_SS_COMPLETED_AT, None)
 
         if not pn_pending:
             st.success("✅ Semua part sudah diproses! Klik 🗑️ Reset untuk memulai ulang.")
@@ -380,6 +411,9 @@ def render_batch_harga_tab(b_rate: float | None = None):
         running = False
         if done_now >= total > 0:
             st.toast(f"✅ Batch selesai! {done_now:,} part diproses.", icon="✅")
+            # Tandai waktu selesai → results bakal auto-clear setelah TTL
+            # supaya RAM tidak nempel kalau user pindah tab.
+            st.session_state[_SS_COMPLETED_AT] = time.time()
 
     # Tampilkan progress bar jika ada data
     if total > 0:
