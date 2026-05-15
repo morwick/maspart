@@ -878,6 +878,46 @@ def inject_keep_alive():
     # Gunakan components.html agar <script> benar-benar dieksekusi browser
     _stc.html(KEEP_ALIVE_JS + SIDEBAR_TOGGLE_JS, height=0, scrolling=False)
 
+# ── Auto-scroll ke section "Gambar Part" setelah Prev/Next/thumbnail ──────
+# Streamlit's st.rerun() reset scroll ke atas. Setelah klik Next ▶ user
+# selalu harus scroll lagi ke bawah untuk lihat gambar berikutnya. Helper
+# di bawah ini menandai bahwa rerun berikutnya harus scroll balik ke
+# anchor `gambar-part-anchor`.
+_IMAGE_SCROLL_FLAG = "_pn_scroll_to_image"
+
+def _request_image_scroll():
+    st.session_state[_IMAGE_SCROLL_FLAG] = True
+
+def _emit_image_scroll_anchor():
+    st.markdown(
+        '<div id="gambar-part-anchor" '
+        'style="position:relative;scroll-margin-top:80px;"></div>',
+        unsafe_allow_html=True,
+    )
+    if st.session_state.pop(_IMAGE_SCROLL_FLAG, False):
+        _stc.html(
+            """
+            <script>
+            (function() {
+              try {
+                var w = window.parent || window;
+                var d = w.document;
+                function go(n) {
+                  var el = d.getElementById('gambar-part-anchor');
+                  if (el) {
+                    el.scrollIntoView({behavior: 'smooth', block: 'start'});
+                    return;
+                  }
+                  if (n < 20) setTimeout(function(){ go(n + 1); }, 80);
+                }
+                go(0);
+              } catch (e) {}
+            })();
+            </script>
+            """,
+            height=0,
+        )
+
 TAB_PERSIST_JS = """
 <script>
 (function() {
@@ -4210,6 +4250,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             st.dataframe(df_res[cols], hide_index=True,
                          column_config={k: v for k, v in col_cfg.items() if k in cols})
             if st.session_state.get("search_type") == "Part Number":
+                _emit_image_scroll_anchor()
                 st.markdown(
                     '<div style="margin:1rem 0 .5rem;font-size:14px;font-weight:700;'
                     'letter-spacing:-.01em;color:var(--mp-ink);">🖼️ Gambar Part</div>',
@@ -4251,6 +4292,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 if st.button("🔄 Refresh dari SIMS", key=f"sims_refresh_{pn}"):
                                     st.session_state.pop(sims_key, None)
                                     st.session_state.pop(sims_err_key, None)
+                                    _request_image_scroll()
                                     st.rerun()
                             sims_err = st.session_state.get(sims_err_key)
                             if sims_err and not img_links and not img_path:
@@ -4269,6 +4311,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 with col_prev:
                                     if st.button("◀ Prev", key=f"prev_{pn}", disabled=(current_idx == 0)):
                                         st.session_state[idx_key] = max(0, current_idx - 1)
+                                        _request_image_scroll()
                                         st.rerun()
                                 with col_info:
                                     st.markdown(
@@ -4279,6 +4322,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 with col_next:
                                     if st.button("Next ▶", key=f"next_{pn}", disabled=(current_idx == total - 1)):
                                         st.session_state[idx_key] = min(total - 1, current_idx + 1)
+                                        _request_image_scroll()
                                         st.rerun()
 
                             active_url = img_links[current_idx]
@@ -4308,6 +4352,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                         label = f"{'✅' if ti == current_idx else '🔲'} {ti+1}"
                                         if st.button(label, key=f"thumb_{pn}_{ti}"):
                                             st.session_state[idx_key] = ti
+                                            _request_image_scroll()
                                             st.rerun()
 
                         elif img_path:
@@ -4324,12 +4369,14 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 with col_p:
                                     if st.button("◀ Prev", key=f"loc_prev_{pn}", disabled=(local_cur == 0)):
                                         st.session_state[local_idx_key] = max(0, local_cur - 1)
+                                        _request_image_scroll()
                                         st.rerun()
                                 with col_i:
                                     st.markdown(f"<div style='text-align:center;padding:6px 0;font-weight:600;color:#1565C0;'>Foto {local_cur+1} / {local_total}</div>", unsafe_allow_html=True)
                                 with col_n:
                                     if st.button("Next ▶", key=f"loc_next_{pn}", disabled=(local_cur == local_total - 1)):
                                         st.session_state[local_idx_key] = min(local_total - 1, local_cur + 1)
+                                        _request_image_scroll()
                                         st.rerun()
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
@@ -4343,6 +4390,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                         lbl = f"{'✅' if ti == local_cur else '🔲'} {ti+1}"
                                         if st.button(lbl, key=f"loc_thumb_{pn}_{ti}"):
                                             st.session_state[local_idx_key] = ti
+                                            _request_image_scroll()
                                             st.rerun()
                         else:
                             if SIMS_ENABLED and st.session_state.get(f"sims_fetched_{pn}") is not None:
@@ -4417,6 +4465,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 if img_path and not img_path.exists():
                     img_path = None
 
+                _emit_image_scroll_anchor()
                 st.markdown(
                     '<div style="margin:1rem 0 .5rem;font-size:14px;font-weight:700;'
                     'letter-spacing:-.01em;color:var(--mp-ink);">🖼️ Gambar Part</div>',
@@ -4429,6 +4478,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                             if st.button("🔄 Refresh dari SIMS", key=f"nf_sims_refresh_{search_term}"):
                                 st.session_state.pop(sims_key, None)
                                 st.session_state.pop(sims_err_key, None)
+                                _request_image_scroll()
                                 st.rerun()
 
                     if img_links or img_path:
@@ -4445,6 +4495,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 with col_prev:
                                     if st.button("◀ Prev", key=f"nf_prev_{search_term}", disabled=(current_idx == 0)):
                                         st.session_state[idx_key] = max(0, current_idx - 1)
+                                        _request_image_scroll()
                                         st.rerun()
                                 with col_info:
                                     st.markdown(
@@ -4455,6 +4506,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 with col_next:
                                     if st.button("Next ▶", key=f"nf_next_{search_term}", disabled=(current_idx == total - 1)):
                                         st.session_state[idx_key] = min(total - 1, current_idx + 1)
+                                        _request_image_scroll()
                                         st.rerun()
 
                             active_url = img_links[current_idx]
@@ -4484,6 +4536,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                         label = f"{'✅' if ti == current_idx else '🔲'} {ti+1}"
                                         if st.button(label, key=f"nf_thumb_{search_term}_{ti}"):
                                             st.session_state[idx_key] = ti
+                                            _request_image_scroll()
                                             st.rerun()
 
                         elif img_path:
@@ -4500,12 +4553,14 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                 with col_p:
                                     if st.button("◀ Prev", key=f"nf_loc_prev_{search_term}", disabled=(nf_cur == 0)):
                                         st.session_state[nf_local_idx_key] = max(0, nf_cur - 1)
+                                        _request_image_scroll()
                                         st.rerun()
                                 with col_i:
                                     st.markdown(f"<div style='text-align:center;padding:6px 0;font-weight:600;color:#1565C0;'>Foto {nf_cur+1} / {nf_total}</div>", unsafe_allow_html=True)
                                 with col_n:
                                     if st.button("Next ▶", key=f"nf_loc_next_{search_term}", disabled=(nf_cur == nf_total - 1)):
                                         st.session_state[nf_local_idx_key] = min(nf_total - 1, nf_cur + 1)
+                                        _request_image_scroll()
                                         st.rerun()
                             _, col_img, _ = st.columns([1, 2, 1])
                             with col_img:
@@ -4519,6 +4574,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                                         lbl = f"{'✅' if ti == nf_cur else '🔲'} {ti+1}"
                                         if st.button(lbl, key=f"nf_loc_thumb_{search_term}_{ti}"):
                                             st.session_state[nf_local_idx_key] = ti
+                                            _request_image_scroll()
                                             st.rerun()
                     else:
                         sims_err = st.session_state.get(sims_err_key)
