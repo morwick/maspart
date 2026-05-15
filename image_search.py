@@ -1379,6 +1379,80 @@ _QUERY_MIN_BYTES   = 5 * 1024
 _QUERY_OK_FORMATS  = {"JPEG", "PNG", "WEBP"}
 
 
+def _inject_mobile_camera_js() -> None:
+    """
+    Inject JS:
+      - Di MOBILE: tambahkan attribute `capture="environment"` ke file input
+        di sub-tab "📷 Kamera" supaya tap langsung buka kamera belakang HP
+        (bukan file picker, bukan webcam browser).
+      - Di DESKTOP: sembunyikan tab "📷 Kamera" — fitur khusus mobile.
+
+    Marker `mp-mobile-camera-marker` ditanam di dalam sub-tab kamera supaya
+    JS bisa nemu file input yang benar (bukan uploader di tab lain).
+    """
+    import streamlit.components.v1 as _stc
+    _stc.html(
+        """
+        <script>
+        (function() {
+          function isMobile() {
+            return /Mobi|Android|iPhone|iPad|iPod|IEMobile|Opera Mini/i
+                     .test(navigator.userAgent);
+          }
+          var w = window.parent || window;
+          var d = w.document;
+
+          function findCameraTab() {
+            var tabs = d.querySelectorAll('[data-baseweb="tab"]');
+            for (var i = 0; i < tabs.length; i++) {
+              var t = (tabs[i].innerText || '').trim();
+              if (t.indexOf('Kamera') !== -1) return tabs[i];
+            }
+            return null;
+          }
+
+          function apply() {
+            var camTab = findCameraTab();
+            var marker = d.getElementById('mp-mobile-camera-marker');
+
+            if (!isMobile()) {
+              if (camTab) camTab.style.display = 'none';
+              return;
+            }
+            if (camTab) camTab.style.display = '';
+
+            if (!marker) return;
+            var panel = marker.closest('[role="tabpanel"]') || marker.parentElement;
+            if (!panel) return;
+            var inputs = panel.querySelectorAll('input[type="file"]');
+            inputs.forEach(function(inp) {
+              if (inp.getAttribute('data-mp-camera') === '1') return;
+              inp.setAttribute('capture', 'environment');
+              inp.setAttribute('accept', 'image/*');
+              inp.setAttribute('data-mp-camera', '1');
+            });
+          }
+
+          apply();
+          var n = 0;
+          var iv = setInterval(function() {
+            apply();
+            if (++n > 25) clearInterval(iv);
+          }, 150);
+
+          if (!w.__mpCameraObserver) {
+            w.__mpCameraObserver = new MutationObserver(apply);
+            w.__mpCameraObserver.observe(d.body, {
+              childList: true, subtree: true
+            });
+          }
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _validate_query_image(raw: bytes, name: str = "") -> tuple[bool, str]:
     """
     Sanity check foto query sebelum embed. Return (ok, error_msg).
@@ -1487,11 +1561,13 @@ def render_search_image_tab():
 
         with col_upload:
             # Sub-tabs: pilih sumber foto (Upload file vs Kamera langsung).
-            # Kamera berguna untuk mekanik lapangan yang akses lewat HP —
-            # langsung jepret part tanpa simpan ke galeri dulu.
+            # Kamera khusus mobile — di desktop tab Kamera disembunyikan via JS,
+            # di HP file input di sub-tab kamera dipatch jadi capture=environment
+            # supaya tap langsung buka kamera belakang (bukan file picker).
             src_tab_upload, src_tab_camera = st.tabs(
                 ["📤 Upload File", "📷 Kamera"]
             )
+            _inject_mobile_camera_js()
 
             with src_tab_upload:
                 uploaded = st.file_uploader(
@@ -1520,24 +1596,30 @@ def render_search_image_tab():
                         st.session_state[_SS_PROCESSED_UPLOAD] = up_id
 
             with src_tab_camera:
-                st.caption(
-                    "Izinkan akses kamera di browser. Di HP, browser biasanya "
-                    "pakai kamera belakang — paling cocok untuk foto part."
+                # Marker untuk JS — file_uploader di bawahnya akan di-patch
+                # dengan attribute capture="environment" supaya buka kamera HP.
+                st.markdown(
+                    '<div id="mp-mobile-camera-marker" style="height:0;"></div>',
+                    unsafe_allow_html=True,
                 )
-                captured = st.camera_input(
-                    "Ambil foto part",
-                    key="img_search_camera",
+                st.caption(
+                    "📱 Khusus untuk HP — tombol di bawah akan langsung "
+                    "buka kamera belakang. Tap, jepret part, lalu klik "
+                    "**Cari Part Sekarang**."
+                )
+                captured = st.file_uploader(
+                    "Ambil foto part dengan kamera HP",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key="img_search_camera_uploader",
                     on_change=_on_query_file_change,
                     label_visibility="collapsed",
                 )
 
                 if captured is not None:
-                    cam_id = getattr(captured, "file_id", None) or "camera_capture"
+                    cam_id = getattr(captured, "file_id", None) or captured.name
                     if st.session_state.get(_SS_PROCESSED_CAMERA) != cam_id:
                         raw_bytes = captured.getvalue()
-                        # Kamera selalu PNG dari browser; tetap validasi defensif
-                        # karena bisa juga gagal di resolusi rendah / lensa tertutup.
-                        ok, err   = _validate_query_image(raw_bytes, "camera.png")
+                        ok, err   = _validate_query_image(raw_bytes, captured.name)
                         if not ok:
                             st.error(f"❌ {err}")
                             st.session_state.pop(_SS_QUERY_BYTES, None)
@@ -1545,8 +1627,9 @@ def render_search_image_tab():
                             st.session_state.pop(_SS_RESULTS,     None)
                         else:
                             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            ext = Path(captured.name).suffix.lower() or ".jpg"
                             st.session_state[_SS_QUERY_BYTES]   = raw_bytes
-                            st.session_state[_SS_QUERY_NAME]    = f"camera_{ts}.png"
+                            st.session_state[_SS_QUERY_NAME]    = f"kamera_{ts}{ext}"
                             st.session_state[_SS_ACTIVE_SOURCE] = "camera"
                         st.session_state[_SS_PROCESSED_CAMERA] = cam_id
 
@@ -1571,7 +1654,7 @@ def render_search_image_tab():
                         _SS_QUERY_BYTES, _SS_QUERY_NAME, _SS_RESULTS,
                         _SS_PROCESSED_UPLOAD, _SS_PROCESSED_CAMERA,
                         _SS_ACTIVE_SOURCE,
-                        "img_search_uploader", "img_search_camera",
+                        "img_search_uploader", "img_search_camera_uploader",
                     ):
                         st.session_state.pop(k, None)
                     _clear_global_pn_results()
