@@ -18,7 +18,12 @@ Cara pakai di app.py:
 
 from __future__ import annotations
 
+import json
+import os
 import time
+from datetime import datetime
+from pathlib import Path
+
 import streamlit as st
 
 from image_search import (
@@ -38,13 +43,124 @@ from image_search import (
 
 # ── Session keys ──────────────────────────────────────────────────────────
 _SS_SINGLE_RESULT = "_img_idx_single_result"
-_SS_BULK_RESULTS  = "_img_idx_bulk_results"
-_SS_BULK_RUNNING  = "_img_idx_bulk_running"
 _SS_DELETE_RESULT = "_img_idx_delete_result"
 _SS_LIST_QUERY    = "_img_idx_list_query"
 _SS_LIST_PAGE     = "_img_idx_list_page"
 
 _PAGE_SIZE = 20
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  BULK JOB CHECKPOINT — resume tahan refresh / sesi mati / circuit-breaker
+# ══════════════════════════════════════════════════════════════════════════
+#
+#  Status tiap PN ditulis ke file JSON SETIAP PN selesai (atomic replace),
+#  bukan hanya di akhir batch. Jadi kalau web di-refresh / sesi Streamlit
+#  mati / circuit-breaker nyala → progress tidak hilang dan bulk bisa
+#  dilanjutkan dari titik terakhir (PN yang sudah selesai di-skip).
+#
+#  File ini hanya untuk ORKESTRASI/VISIBILITAS. Data embedding sendiri
+#  tetap di-upsert per-PN ke Supabase oleh index_part_number (tidak berubah).
+
+_JOB_DIR  = Path(".cache")
+_JOB_PATH = _JOB_DIR / "image_index_bulk_job.json"
+
+# State yang masih bisa di-resume (belum tuntas / perlu dicoba ulang).
+# "empty" (tidak ada foto SIMS) & "done"/"skipped" dianggap final.
+_RESUMABLE_STATES = {"pending", "failed", "cancelled"}
+
+
+def _job_load() -> dict | None:
+    try:
+        if _JOB_PATH.exists():
+            with open(_JOB_PATH, "r", encoding="utf-8") as f:
+                job = json.load(f)
+            if isinstance(job, dict) and job.get("order"):
+                return job
+    except Exception as e:
+        print(f"[image_index] gagal baca job checkpoint: {e}")
+    return None
+
+
+def _job_save(job: dict) -> None:
+    """Tulis atomik (tmp + os.replace) supaya tidak korup kalau proses mati di tengah write."""
+    try:
+        _JOB_DIR.mkdir(parents=True, exist_ok=True)
+        job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        tmp = _JOB_PATH.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(job, f, ensure_ascii=False)
+        os.replace(tmp, _JOB_PATH)
+    except Exception as e:
+        print(f"[image_index] gagal simpan job checkpoint: {e}")
+
+
+def _job_clear() -> None:
+    try:
+        if _JOB_PATH.exists():
+            _JOB_PATH.unlink()
+    except Exception as e:
+        print(f"[image_index] gagal hapus job checkpoint: {e}")
+
+
+def _job_init(order: list[str], indexed_by: str, skip_existing: bool) -> dict:
+    now = datetime.now().isoformat(timespec="seconds")
+    job = {
+        "created_at":    now,
+        "updated_at":    now,
+        "indexed_by":    indexed_by,
+        "skip_existing": bool(skip_existing),
+        "status":        "running",
+        "order":         list(order),
+        "pns": {pn: {"state": "pending", "n_indexed": 0, "n_photos": 0,
+                     "n_skipped": 0, "error": ""} for pn in order},
+    }
+    _job_save(job)
+    return job
+
+
+def _state_from_result(r: dict) -> str:
+    if r.get("skipped_existing"):
+        return "skipped"
+    if r.get("cancelled") or r.get("aborted"):
+        return "pending"          # belum benar-benar diproses → bisa di-resume
+    if r.get("ok"):
+        return "done"
+    if r.get("n_photos", 0) == 0:
+        return "empty"            # tidak ada foto SIMS → final, tidak di-retry
+    return "failed"
+
+
+def _job_apply(job: dict, pn: str, r: dict) -> None:
+    e = job["pns"].get(pn)
+    if e is None:
+        e = {}
+        job["pns"][pn] = e
+        if pn not in job["order"]:
+            job["order"].append(pn)
+    e["state"]     = _state_from_result(r)
+    e["n_indexed"] = r.get("n_indexed", 0)
+    e["n_photos"]  = r.get("n_photos", 0)
+    e["n_skipped"] = r.get("n_skipped", 0)
+    e["error"]     = (r.get("error") or "")[:300]
+
+
+def _job_remaining(job: dict) -> list[str]:
+    return [pn for pn in job.get("order", [])
+            if job.get("pns", {}).get(pn, {}).get("state") in _RESUMABLE_STATES]
+
+
+def _job_counts(job: dict) -> dict:
+    c = {"total": len(job.get("order", [])), "done": 0, "skipped": 0,
+         "empty": 0, "failed": 0, "pending": 0}
+    for pn in job.get("order", []):
+        s = job.get("pns", {}).get(pn, {}).get("state", "pending")
+        if   s == "done":    c["done"]    += 1
+        elif s == "skipped": c["skipped"] += 1
+        elif s == "empty":   c["empty"]   += 1
+        elif s == "failed":  c["failed"]  += 1
+        else:                c["pending"] += 1
+    return c
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -257,17 +373,93 @@ def _render_single_result(r: dict):
 #  MODE 2 — BULK PN
 # ══════════════════════════════════════════════════════════════════════════
 
+def _execute_bulk(pns_to_process: list[str], indexed_by: str, job: dict,
+                  prefilter_msg: str | None = None):
+    """
+    Jalankan index_bulk + tulis progress ke job checkpoint SETIAP PN selesai.
+    Dipakai baik untuk bulk baru maupun lanjutkan job lama.
+    """
+    progress_area = st.container()
+    with progress_area:
+        if prefilter_msg:
+            st.info(prefilter_msg)
+        progress_bar = st.progress(0.0, text="Memulai...")
+        status_text  = st.empty()
+        log_area     = st.empty()
+
+    t0 = time.time()
+    log_lines: list[str] = []
+
+    def _cb(i, total, pn, r):
+        pct = i / total if total else 1.0
+        progress_bar.progress(pct, text=f"{i}/{total} — {pn}")
+
+        # ── Checkpoint: persist status PN ini SEKARANG (tahan refresh) ──
+        try:
+            _job_apply(job, pn, r)
+            _job_save(job)
+        except Exception:
+            pass
+
+        n_idx = r.get("n_indexed", 0)
+        n_skp = r.get("n_skipped", 0)
+        if r.get("ok"):
+            if n_idx > 0 and n_skp > 0:
+                sym, msg = "✅", f"+{n_idx} foto baru, {n_skp} skip"
+            elif n_idx == 0 and n_skp > 0:
+                sym, msg = "⏭️", f"semua {n_skp} foto sudah ter-index"
+            else:
+                sym, msg = "✅", f"{n_idx}/{r.get('n_photos', 0)} foto"
+        elif r.get("n_photos", 0) == 0:
+            sym, msg = "⚪", "tidak ada foto SIMS"
+        else:
+            sym, msg = "❌", (r.get("error") or "gagal")[:60]
+        log_lines.append(f"{sym} {pn} — {msg}")
+        log_area.text("\n".join(log_lines[-20:]))
+        status_text.caption(f"Memproses **{i}/{total}** — {pn}")
+
+    if pns_to_process:
+        index_bulk(pns_to_process, indexed_by=indexed_by, progress_callback=_cb)
+    else:
+        progress_bar.progress(1.0, text="Tidak ada PN untuk diproses")
+
+    elapsed = time.time() - t0
+
+    # ── Finalisasi status job ──
+    remaining = _job_remaining(job)
+    job["status"] = "done" if not remaining else "stopped"
+    _job_save(job)
+
+    progress_bar.progress(1.0, text=f"Selesai dalam {elapsed:.1f}s")
+    status_text.empty()
+    st.rerun()
+
+
 def _render_bulk_mode():
-    """Textarea PN (1 per baris) → batch index."""
+    """Textarea PN (1 per baris) → batch index, dengan checkpoint resume."""
     st.markdown("#### Tambah Banyak Part Number Sekaligus")
     st.caption(
         "Masukkan 1 PN per baris. "
-        "Proses bisa memakan waktu (~1-3 detik per PN, tergantung jumlah foto)."
+        "Proses bisa memakan waktu (~1-3 detik per PN, tergantung jumlah foto). "
+        "Progress disimpan otomatis tiap PN — aman dari refresh / sesi putus."
     )
 
     user = st.session_state.get("current_user", {})
     indexed_by = user.get("username", "admin") if isinstance(user, dict) else "admin"
 
+    job = _job_load()
+
+    # ── Ada job tersimpan? ────────────────────────────────────────────────
+    if job:
+        remaining = _job_remaining(job)
+        if remaining:
+            _render_resume_panel(job, remaining, indexed_by)
+            return
+        # Job sudah tuntas → tampilkan ringkasan + tombol mulai baru
+        _render_bulk_summary(job)
+        return
+
+    # ── Form bulk baru ────────────────────────────────────────────────────
     bulk_text = st.text_area(
         "Daftar Part Number:",
         placeholder="WG1641230025\nKRTC1700001\nAZ9100440006\n…",
@@ -275,9 +467,7 @@ def _render_bulk_mode():
         height=200,
     )
 
-    # Parse PN list (preview count)
-    pn_list = [p.strip().upper() for p in bulk_text.splitlines()
-               if p.strip()]
+    pn_list = [p.strip().upper() for p in bulk_text.splitlines() if p.strip()]
     pn_list_unique = list(dict.fromkeys(pn_list))
     n_unique = len(pn_list_unique)
 
@@ -306,138 +496,121 @@ def _render_bulk_mode():
             disabled=(n_unique == 0),
         )
 
-    # Tampilkan hasil sebelumnya (kalau ada)
-    prev_results = st.session_state.get(_SS_BULK_RESULTS)
-    if prev_results and not do_bulk:
-        _render_bulk_summary(prev_results)
-        return
-
-    # Eksekusi bulk
     if do_bulk and pn_list_unique:
-        progress_area = st.container()
-        with progress_area:
-            prefilter_box = st.empty()
-            progress_bar  = st.progress(0.0, text="Memulai...")
-            status_text   = st.empty()
-            log_area      = st.empty()
+        # Buat checkpoint job — semua PN "pending" dulu
+        job = _job_init(pn_list_unique, indexed_by, skip_existing)
 
-        t0 = time.time()
-
-        # ── Pre-filter: fast mode skip PN yang sudah ter-index ──
-        skipped_results: list[dict] = []
-        pns_to_process = pn_list_unique
+        prefilter_msg = None
         if skip_existing:
             with st.spinner("⚡ Cek PN yang sudah ter-index..."):
                 existing = get_all_indexed_pns()
-            pns_to_process = [pn for pn in pn_list_unique if pn not in existing]
-            skipped_pns    = [pn for pn in pn_list_unique if pn in existing]
-            skipped_results = [{
-                "ok":               True,
-                "pn":               pn,
-                "n_photos":         0,
-                "n_indexed":        0,
-                "n_skipped":        0,
-                "error":            "",
-                "skipped_existing": True,
-            } for pn in skipped_pns]
+            skipped_pns = [pn for pn in pn_list_unique if pn in existing]
+            for pn in skipped_pns:
+                _job_apply(job, pn, {
+                    "ok": True, "pn": pn, "n_photos": 0, "n_indexed": 0,
+                    "n_skipped": 0, "error": "", "skipped_existing": True,
+                })
+            _job_save(job)
             if skipped_pns:
-                prefilter_box.info(
+                prefilter_msg = (
                     f"⚡ **{len(skipped_pns)}** PN sudah ter-index → di-skip langsung "
-                    f"(fast mode). Memproses **{len(pns_to_process)}** PN baru..."
+                    f"(fast mode). Memproses **{n_unique - len(skipped_pns)}** PN..."
                 )
 
-        log_lines = []
+        _execute_bulk(_job_remaining(job), indexed_by, job, prefilter_msg)
 
-        def _cb(i, total, pn, r):
-            pct = i / total if total else 1.0
-            progress_bar.progress(pct, text=f"{i}/{total} — {pn}")
-            n_idx = r.get("n_indexed", 0)
-            n_skp = r.get("n_skipped", 0)
-            if r.get("ok"):
-                if n_idx > 0 and n_skp > 0:
-                    sym = "✅"
-                    msg = f"+{n_idx} foto baru, {n_skp} skip"
-                elif n_idx == 0 and n_skp > 0:
-                    sym = "⏭️"
-                    msg = f"semua {n_skp} foto sudah ter-index"
-                else:
-                    sym = "✅"
-                    msg = f"{n_idx}/{r['n_photos']} foto"
-            elif r.get("n_photos", 0) == 0:
-                sym = "⚪"
-                msg = "tidak ada foto SIMS"
+
+def _render_resume_panel(job: dict, remaining: list[str], indexed_by: str):
+    """Panel saat ada bulk belum selesai (refresh / sesi mati / di-stop)."""
+    c = _job_counts(job)
+    done_terminal = c["done"] + c["skipped"] + c["empty"]
+
+    st.warning(
+        f"⏸️ **Ada bulk yang belum selesai** (dibuat {job.get('created_at', '—')}, "
+        f"oleh `{job.get('indexed_by', '—')}`). "
+        f"Progress tersimpan otomatis — bisa dilanjutkan."
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total PN", c["total"])
+    m2.metric("Selesai", done_terminal)
+    m3.metric("Sisa diproses", len(remaining))
+    m4.metric("Gagal", c["failed"])
+    if c["total"]:
+        st.progress(min(done_terminal / c["total"], 1.0),
+                    text=f"{done_terminal}/{c['total']} tuntas")
+
+    _render_job_detail(job)
+
+    col_go, col_drop = st.columns([2, 1])
+    with col_go:
+        if st.button(
+            f"▶️ Lanjutkan ({len(remaining)} PN sisa)",
+            type="primary", use_container_width=True,
+            key="btn_img_idx_bulk_resume",
+        ):
+            job["status"] = "running"
+            _job_save(job)
+            _execute_bulk(remaining, indexed_by, job,
+                          prefilter_msg=f"▶️ Melanjutkan {len(remaining)} PN "
+                                        f"yang belum selesai...")
+    with col_drop:
+        if st.button("🗑️ Buang job ini", use_container_width=True,
+                     key="btn_img_idx_bulk_discard"):
+            _job_clear()
+            st.rerun()
+
+
+def _render_job_detail(job: dict):
+    """Expander detail per-PN dari job checkpoint."""
+    order = job.get("order", [])
+    with st.expander(f"📋 Detail per PN ({len(order)})", expanded=False):
+        sym = {"done": "✅", "skipped": "⚡", "empty": "⚪",
+               "failed": "❌", "pending": "⏳", "cancelled": "⏳"}
+        for pn in order:
+            e = job.get("pns", {}).get(pn, {})
+            s = e.get("state", "pending")
+            if s == "done":
+                st.markdown(f"- ✅ **{pn}** — {e.get('n_indexed',0)}/{e.get('n_photos',0)} foto")
+            elif s == "skipped":
+                st.markdown(f"- ⚡ **{pn}** — sudah ter-index (fast mode skip)")
+            elif s == "empty":
+                st.markdown(f"- ⚪ **{pn}** — tidak ada foto SIMS")
+            elif s == "failed":
+                st.markdown(f"- ❌ **{pn}** — {e.get('error','') or 'gagal'}")
             else:
-                sym = "❌"
-                msg = (r.get("error") or "gagal")[:60]
-            log_lines.append(f"{sym} {pn} — {msg}")
-            # tampilkan 20 baris terakhir
-            log_area.text("\n".join(log_lines[-20:]))
-            status_text.caption(f"Memproses **{i}/{total}** — {pn}")
-
-        if pns_to_process:
-            new_results = index_bulk(pns_to_process, indexed_by=indexed_by,
-                                     progress_callback=_cb)
-        else:
-            new_results = []
-            progress_bar.progress(1.0, text="Tidak ada PN baru untuk diproses")
-
-        elapsed = time.time() - t0
-        all_results = skipped_results + new_results
-
-        progress_bar.progress(1.0, text=f"Selesai dalam {elapsed:.1f}s")
-        status_text.empty()
-
-        st.session_state[_SS_BULK_RESULTS] = {
-            "results": all_results,
-            "elapsed": elapsed,
-        }
-        st.rerun()
+                st.markdown(f"- ⏳ **{pn}** — belum diproses")
 
 
-def _render_bulk_summary(payload: dict):
-    """Render ringkasan hasil bulk indexing."""
-    results = payload["results"]
-    elapsed = payload["elapsed"]
-
-    n_total      = len(results)
-    n_fast_skip  = sum(1 for r in results if r.get("skipped_existing"))
-    n_ok         = sum(1 for r in results
-                       if r.get("ok") and not r.get("skipped_existing"))
-    n_empty      = sum(1 for r in results
-                       if not r.get("ok") and r.get("n_photos", 0) == 0)
-    n_err        = n_total - n_ok - n_empty - n_fast_skip
-
-    total_photos = sum(r.get("n_indexed", 0) for r in results)
+def _render_bulk_summary(job: dict):
+    """Ringkasan saat job sudah tuntas (tidak ada PN sisa)."""
+    c = _job_counts(job)
+    total_photos = sum(e.get("n_indexed", 0)
+                       for e in job.get("pns", {}).values())
 
     parts = []
-    if n_ok:        parts.append(f"{n_ok} sukses")
-    if n_fast_skip: parts.append(f"⚡ {n_fast_skip} skip (sudah ter-index)")
-    if n_empty:     parts.append(f"{n_empty} tanpa foto SIMS")
-    if n_err:       parts.append(f"{n_err} error")
+    if c["done"]:    parts.append(f"{c['done']} sukses")
+    if c["skipped"]: parts.append(f"⚡ {c['skipped']} skip (sudah ter-index)")
+    if c["empty"]:   parts.append(f"{c['empty']} tanpa foto SIMS")
+    if c["failed"]:  parts.append(f"{c['failed']} error")
+
+    elapsed_txt = ""
+    try:
+        t0 = datetime.fromisoformat(job["created_at"])
+        t1 = datetime.fromisoformat(job["updated_at"])
+        elapsed_txt = f" dalam **{(t1 - t0).total_seconds():.0f}s**"
+    except Exception:
+        pass
 
     st.success(
-        f"✅ Selesai dalam **{elapsed:.1f}s** — " + ", ".join(parts) +
+        f"✅ Bulk selesai{elapsed_txt} — " + ", ".join(parts) +
         f". Total **{total_photos}** foto baru ter-index."
     )
 
-    # Detail expandable
-    with st.expander(f"📋 Detail per PN ({n_total} hasil)", expanded=False):
-        for r in results:
-            pn        = r.get("pn", "")
-            n_indexed = r.get("n_indexed", 0)
-            n_photos  = r.get("n_photos", 0)
-            err       = r.get("error", "")
-            if r.get("skipped_existing"):
-                st.markdown(f"- ⚡ **{pn}** — sudah ter-index (fast mode skip)")
-            elif r.get("ok"):
-                st.markdown(f"- ✅ **{pn}** — {n_indexed}/{n_photos} foto")
-            elif n_photos == 0:
-                st.markdown(f"- ⚪ **{pn}** — tidak ada foto SIMS")
-            else:
-                st.markdown(f"- ❌ **{pn}** — {err}")
+    _render_job_detail(job)
 
     if st.button("🆕 Mulai bulk baru", key="btn_img_idx_bulk_reset"):
-        st.session_state.pop(_SS_BULK_RESULTS, None)
+        _job_clear()
         st.session_state["img_idx_bulk_text"] = ""
         st.rerun()
 

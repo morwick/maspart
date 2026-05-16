@@ -1,1 +1,5 @@
 .streamlit/secrets.toml
+
+# Artefak runtime (jangan di-commit)
+.cache/
+__pycache__/
