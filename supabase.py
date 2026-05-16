@@ -107,8 +107,16 @@ def _verify_password(plain: str, stored_hash: str, legacy_plain: str = "") -> bo
         return False
     if stored_hash and _HAS_BCRYPT:
         try:
-            return bcrypt.checkpw(plain.encode("utf-8"),
-                                  stored_hash.encode("utf-8"))
+            hash_b = stored_hash.encode("utf-8")
+            # Password di-hash dari versi .strip() (lihat add_user /
+            # update_user_password), jadi verifikasi utama juga pakai .strip()
+            # supaya konsisten. Fallback ke nilai mentah agar hash lama
+            # (kalau ada yang dibuat tanpa strip) tetap kompatibel.
+            if bcrypt.checkpw(plain.strip().encode("utf-8"), hash_b):
+                return True
+            if plain != plain.strip():
+                return bcrypt.checkpw(plain.encode("utf-8"), hash_b)
+            return False
         except Exception:
             return False
     if legacy_plain:
