@@ -18,12 +18,10 @@ Cara pakai di app.py:
 
 from __future__ import annotations
 
-import json
-import os
 import time
 from datetime import datetime
-from pathlib import Path
 
+import requests
 import streamlit as st
 
 from image_search import (
@@ -38,6 +36,8 @@ from image_search import (
     get_all_indexed_pns,
     get_sims_cache_stats,
     clear_sims_cache,
+    _rest_url,
+    _rest_headers,
 )
 
 
@@ -51,54 +51,113 @@ _PAGE_SIZE = 20
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  BULK JOB CHECKPOINT — resume tahan refresh / sesi mati / circuit-breaker
+#  BULK JOB CHECKPOINT — disimpan di SUPABASE (tahan reboot Streamlit Cloud)
 # ══════════════════════════════════════════════════════════════════════════
 #
-#  Status tiap PN ditulis ke file JSON SETIAP PN selesai (atomic replace),
-#  bukan hanya di akhir batch. Jadi kalau web di-refresh / sesi Streamlit
-#  mati / circuit-breaker nyala → progress tidak hilang dan bulk bisa
-#  dilanjutkan dari titik terakhir (PN yang sudah selesai di-skip).
+#  Status tiap PN ditulis ke tabel Supabase `image_index_bulk_job` SETIAP PN
+#  selesai, bukan hanya di akhir batch. Karena Supabase adalah DB eksternal,
+#  checkpoint TIDAK hilang walau Streamlit Cloud reboot/redeploy (filesystem
+#  Cloud ephemeral — file .cache lama tidak bertahan, makanya pindah ke DB).
 #
-#  File ini hanya untuk ORKESTRASI/VISIBILITAS. Data embedding sendiri
-#  tetap di-upsert per-PN ke Supabase oleh index_part_number (tidak berubah).
+#  Indexing admin-only → 1 baris singleton (id=1) cukup, tidak per-user.
+#  Checkpoint ini hanya untuk ORKESTRASI/VISIBILITAS. Data embedding sendiri
+#  tetap di-upsert per-PN ke `part_image_index` oleh index_part_number.
+#
+#  ⚠️  Butuh tabel di Supabase — jalankan _SETUP_SQL sekali di SQL Editor.
 
-_JOB_DIR  = Path(".cache")
-_JOB_PATH = _JOB_DIR / "image_index_bulk_job.json"
+_JOB_TABLE  = "image_index_bulk_job"
+_JOB_ROW_ID = 1   # singleton: indexing admin-only → 1 job global
+
+_SETUP_SQL = (
+    "create table if not exists image_index_bulk_job (\n"
+    "    id         int primary key default 1,\n"
+    "    job        jsonb not null,\n"
+    "    updated_at timestamptz not null default now(),\n"
+    "    constraint image_index_bulk_job_singleton check (id = 1)\n"
+    ");"
+)
 
 # State yang masih bisa di-resume (belum tuntas / perlu dicoba ulang).
 # "empty" (tidak ada foto SIMS) & "done"/"skipped" dianggap final.
 _RESUMABLE_STATES = {"pending", "failed", "cancelled"}
 
+_SS_SETUP_NEEDED = "_img_idx_job_setup_needed"
+
+
+def _is_missing_table(resp) -> bool:
+    """Deteksi error 'tabel belum dibuat' dari PostgREST."""
+    if resp.status_code not in (404, 400, 406):
+        return False
+    t = (resp.text or "").lower()
+    return ("does not exist" in t or "could not find the table" in t
+            or "pgrst205" in t or "42p01" in t)
+
 
 def _job_load() -> dict | None:
+    if not _is_configured():
+        return None
     try:
-        if _JOB_PATH.exists():
-            with open(_JOB_PATH, "r", encoding="utf-8") as f:
-                job = json.load(f)
-            if isinstance(job, dict) and job.get("order"):
-                return job
+        resp = requests.get(
+            _rest_url(_JOB_TABLE),
+            headers=_rest_headers(use_service=True),
+            params={"id": f"eq.{_JOB_ROW_ID}", "select": "job"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            rows = resp.json() or []
+            if rows:
+                job = rows[0].get("job")
+                if isinstance(job, dict) and job.get("order"):
+                    return job
+            return None
+        if _is_missing_table(resp):
+            st.session_state[_SS_SETUP_NEEDED] = True
+        else:
+            print(f"[image_index] load job HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         print(f"[image_index] gagal baca job checkpoint: {e}")
     return None
 
 
-def _job_save(job: dict) -> None:
-    """Tulis atomik (tmp + os.replace) supaya tidak korup kalau proses mati di tengah write."""
-    try:
-        _JOB_DIR.mkdir(parents=True, exist_ok=True)
-        job["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        tmp = _JOB_PATH.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(job, f, ensure_ascii=False)
-        os.replace(tmp, _JOB_PATH)
-    except Exception as e:
-        print(f"[image_index] gagal simpan job checkpoint: {e}")
+def _job_save(job: dict) -> bool:
+    """Upsert seluruh job ke 1 baris Supabase (atomik per-request). Retry transient."""
+    if not _is_configured():
+        return False
+    job["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    body = [{"id": _JOB_ROW_ID, "job": job, "updated_at": job["updated_at"]}]
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                _rest_url(_JOB_TABLE),
+                headers={**_rest_headers(use_service=True),
+                         "Prefer": "resolution=merge-duplicates,return=minimal"},
+                params={"on_conflict": "id"},
+                json=body,
+                timeout=20,
+            )
+            if resp.status_code in (200, 201, 204):
+                return True
+            if _is_missing_table(resp):
+                st.session_state[_SS_SETUP_NEEDED] = True
+                return False
+            print(f"[image_index] simpan job HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            print(f"[image_index] gagal simpan job checkpoint: {e}")
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))
+    return False
 
 
 def _job_clear() -> None:
+    if not _is_configured():
+        return
     try:
-        if _JOB_PATH.exists():
-            _JOB_PATH.unlink()
+        requests.delete(
+            _rest_url(_JOB_TABLE),
+            headers=_rest_headers(use_service=True),
+            params={"id": f"eq.{_JOB_ROW_ID}"},
+            timeout=15,
+        )
     except Exception as e:
         print(f"[image_index] gagal hapus job checkpoint: {e}")
 
@@ -441,13 +500,23 @@ def _render_bulk_mode():
     st.caption(
         "Masukkan 1 PN per baris. "
         "Proses bisa memakan waktu (~1-3 detik per PN, tergantung jumlah foto). "
-        "Progress disimpan otomatis tiap PN — aman dari refresh / sesi putus."
+        "Progress disimpan ke Supabase tiap PN — aman dari refresh / sesi putus / "
+        "reboot Streamlit Cloud."
     )
 
     user = st.session_state.get("current_user", {})
     indexed_by = user.get("username", "admin") if isinstance(user, dict) else "admin"
 
     job = _job_load()
+
+    if st.session_state.get(_SS_SETUP_NEEDED):
+        st.warning(
+            "⚠️ Tabel checkpoint `image_index_bulk_job` belum ada di Supabase. "
+            "Bulk indexing tetap bisa jalan & datanya tetap aman di "
+            "`part_image_index`, **tapi resume tahan-reboot belum aktif** sampai "
+            "tabel ini dibuat. Jalankan SQL ini sekali di **Supabase → SQL Editor**:"
+        )
+        st.code(_SETUP_SQL, language="sql")
 
     # ── Ada job tersimpan? ────────────────────────────────────────────────
     if job:
