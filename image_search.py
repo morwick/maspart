@@ -1834,7 +1834,7 @@ def render_search_image_tab():
     # ── Result header dengan summary inline ───────────────────────────────
     n_kept = len(results)
     n_drop = len(fallback)
-    drop_text = f" · 🗑️ {n_drop} disaring" if n_drop > 0 else ""
+    drop_text = f" · ⚠️ {n_drop} low confidence" if n_drop > 0 else ""
 
     st.markdown(
         f"""
@@ -1859,14 +1859,9 @@ def render_search_image_tab():
         if fallback:
             best_sim = fallback[0]["similarity"] * 100
             st.warning(
-                f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%** — "
-                f"kemungkinan part belum di-index, atau foto query terlalu beda dari foto SIMS."
+                f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%**."
             )
-            with st.expander(
-                f"🔍 Lihat {len(fallback)} kandidat terdekat (low confidence)",
-                expanded=False,
-            ):
-                _render_card_grid(fallback, start_rank=1)
+            _render_card_grid(fallback, start_rank=1)
         else:
             st.warning(
                 "⚠️ Tidak ada hasil sama sekali. "
@@ -1915,12 +1910,18 @@ def render_search_image_tab():
 
     # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
     if fallback:
-        with st.expander(
-            f"👁️ Lihat {len(fallback)} kandidat yang disaring smart filter",
-            expanded=False,
-        ):
+        st.markdown(
+            """
+            <div style="margin:14px 0 6px 0; color:#6b7280; font-size:12px;
+                        font-weight:600;">
+              🔎 Kandidat tambahan (low confidence)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if filter_reason:
             st.caption(f"Disaring karena: {filter_reason}")
-            _render_card_grid(fallback, start_rank=len(results) + 1)
+        _render_card_grid(fallback, start_rank=len(results) + 1)
 
 
 _CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
