@@ -1871,44 +1871,8 @@ def render_search_image_tab():
             f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%**."
         )
 
-    is_ambiguous = st.session_state.get("_img_search_ambiguous", False)
-    ambig_count  = st.session_state.get("_img_search_ambiguous_count", 1)
-
-    if is_ambiguous:
-        # ── Ambiguous mode: top-N sejajar, no BEST MATCH crown ────────────
-        st.markdown(
-            """
-            <div style="margin:8px 0 6px 0; color:#92400e; font-size:12px;
-                        background:#fffbeb; border-left:4px solid #f59e0b;
-                        padding:8px 12px; border-radius:4px;">
-              💡 <b>Tip:</b> kalau sering ambigu, coba upload foto dengan
-              background polos & crop tight ke part — kurangi noise visual
-              seperti watermark/logo/permukaan tekstur.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Render top ambig_count sebagai grid 2 kolom equal-weight
-        ambiguous_results = results[:ambig_count]
-        _render_card_grid(ambiguous_results, start_rank=1, is_ambiguous=True)
-
-        # Sisa hasil di bawah tier ambiguous
-        rest_results = results[ambig_count:]
-        if rest_results:
-            st.markdown(
-                """
-                <div style="margin:14px 0 6px 0; color:#6b7280; font-size:12px;
-                            font-weight:600;">
-                  🔎 Kandidat dengan similarity lebih rendah
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            _render_card_grid(rest_results, start_rank=ambig_count + 1)
-    else:
-        # ── Normal mode: render semua hasil dalam grid 2 kolom ────────────
-        _render_card_grid(results, start_rank=1)
+    # ── Render semua hasil dalam grid 2 kolom ─────────────────────────────
+    _render_card_grid(results, start_rank=1)
 
 
 _CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
