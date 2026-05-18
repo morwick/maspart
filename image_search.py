@@ -1829,12 +1829,15 @@ def render_search_image_tab():
     top_sim       = st.session_state.get("_img_search_top_sim", 0.0)
     fallback      = st.session_state.get("_img_search_fallback", [])
 
+    # Gabungkan semua kandidat jadi satu daftar hasil — tanpa pemisahan
+    # "disaring" / low confidence. Semuanya masuk Hasil Pencarian.
+    had_confident = len(results) > 0
+    results = list(results) + list(fallback)
+
     st.markdown("---")
 
     # ── Result header dengan summary inline ───────────────────────────────
     n_kept = len(results)
-    n_drop = len(fallback)
-    drop_text = f" · ⚠️ {n_drop} low confidence" if n_drop > 0 else ""
 
     st.markdown(
         f"""
@@ -1842,7 +1845,7 @@ def render_search_image_tab():
                     margin-bottom:10px; flex-wrap:wrap; gap:8px;">
           <h3 style="margin:0; font-size:20px;">📋 Hasil Pencarian</h3>
           <div style="color:#6b7280; font-size:12px;">
-            ⚡ {elapsed:.2f}s · ✅ {n_kept} cocok{drop_text}
+            ⚡ {elapsed:.2f}s · ✅ {n_kept} hasil
           </div>
         </div>
         """,
@@ -1856,18 +1859,17 @@ def render_search_image_tab():
         st.info(f"ℹ️ **Match sedang** — top similarity **{top_sim*100:.1f}%**")
 
     if not results:
-        if fallback:
-            best_sim = fallback[0]["similarity"] * 100
-            st.warning(
-                f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%**."
-            )
-            _render_card_grid(fallback, start_rank=1)
-        else:
-            st.warning(
-                "⚠️ Tidak ada hasil sama sekali. "
-                "Pastikan sudah ada PN yang di-index di tab **🧠 Image Index**."
-            )
+        st.warning(
+            "⚠️ Tidak ada hasil sama sekali. "
+            "Pastikan sudah ada PN yang di-index di tab **🧠 Image Index**."
+        )
         return
+
+    if not had_confident:
+        best_sim = results[0]["similarity"] * 100
+        st.warning(
+            f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%**."
+        )
 
     is_ambiguous = st.session_state.get("_img_search_ambiguous", False)
     ambig_count  = st.session_state.get("_img_search_ambiguous_count", 1)
@@ -1907,21 +1909,6 @@ def render_search_image_tab():
     else:
         # ── Normal mode: render semua hasil dalam grid 2 kolom ────────────
         _render_card_grid(results, start_rank=1)
-
-    # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
-    if fallback:
-        st.markdown(
-            """
-            <div style="margin:14px 0 6px 0; color:#6b7280; font-size:12px;
-                        font-weight:600;">
-              🔎 Kandidat tambahan (low confidence)
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if filter_reason:
-            st.caption(f"Disaring karena: {filter_reason}")
-        _render_card_grid(fallback, start_rank=len(results) + 1)
 
 
 _CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
