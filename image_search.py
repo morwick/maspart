@@ -1094,13 +1094,12 @@ def search_by_image(image_bytes: bytes,
 #  SMART FILTER — adaptive cutoff tanpa threshold manual
 # ══════════════════════════════════════════════════════════════════════════
 
-# Konstanta filter — dipilih berdasarkan karakter DINOv2 untuk sparepart:
-# noise floor 55% (di bawah itu = bentuk silinder/balok generik),
-# cliff 8% (gap antar hasil yang nyata = beda kategori part),
-# relative drop 15% (lebih dari ini dari top = different family).
-_SMART_ABS_FLOOR = 0.55
-_SMART_REL_DROP  = 0.15
-_SMART_CLIFF     = 0.08
+# Konstanta filter — kebijakan user: tampilkan semua kandidat di atas 30%.
+# Rel-drop & cliff dimatikan (set ke 1.0) supaya tidak memotong hasil
+# yang masih di atas noise floor.
+_SMART_ABS_FLOOR = 0.30
+_SMART_REL_DROP  = 1.0
+_SMART_CLIFF     = 1.0
 _SMART_HIGH_CONF = 0.80
 
 # Ambiguous mode: top-N dalam gap kecil → tidak pasti mana yang BEST
@@ -1113,13 +1112,11 @@ def smart_filter_results(results: list[dict]) -> dict:
     """
     Filter hasil pencarian otomatis tanpa threshold manual.
 
-    Mekanisme (semua kondisi dicek per item; cut-off saat salah satu kena):
-      1. Absolute floor: skip item < 55% (DINOv2 noise zone)
-      2. Relative drop: skip item > 15% lebih rendah dari top hit
-      3. Cliff: skip kalau ada gap > 8% dari item sebelumnya,
-         KECUALI item masih di zona high-confidence (≥80%) — di zona ini
-         semua hasil di-keep karena gap kecil tetap match valid.
-      4. Kalau top hit < 55% → return kosong (tidak ada match meyakinkan)
+    Kebijakan saat ini: tampilkan SEMUA kandidat yang similarity-nya ≥ 30%.
+    Tidak ada pemotongan rel-drop atau cliff — user yang menilai relevansi
+    dari angka similarity di tiap card.
+      1. Absolute floor: skip item < 30%
+      2. Kalau top hit < 30% → return kosong (tidak ada match meyakinkan)
 
     Return:
       {
@@ -1829,15 +1826,12 @@ def render_search_image_tab():
     top_sim       = st.session_state.get("_img_search_top_sim", 0.0)
     fallback      = st.session_state.get("_img_search_fallback", [])
 
-    # Gabungkan semua kandidat jadi satu daftar hasil — tanpa pemisahan
-    # "disaring" / low confidence. Semuanya masuk Hasil Pencarian.
-    had_confident = len(results) > 0
-    results = list(results) + list(fallback)
-
     st.markdown("---")
 
     # ── Result header dengan summary inline ───────────────────────────────
     n_kept = len(results)
+    n_drop = len(fallback)
+    drop_text = f" · ⚠️ {n_drop} low confidence" if n_drop > 0 else ""
 
     st.markdown(
         f"""
@@ -1845,7 +1839,7 @@ def render_search_image_tab():
                     margin-bottom:10px; flex-wrap:wrap; gap:8px;">
           <h3 style="margin:0; font-size:20px;">📋 Hasil Pencarian</h3>
           <div style="color:#6b7280; font-size:12px;">
-            ⚡ {elapsed:.2f}s · ✅ {n_kept} hasil
+            ⚡ {elapsed:.2f}s · ✅ {n_kept} cocok{drop_text}
           </div>
         </div>
         """,
@@ -1857,22 +1851,40 @@ def render_search_image_tab():
         st.success(f"✅ **Match kuat** — top similarity **{top_sim*100:.1f}%**")
     elif filter_mode == "moderate":
         st.info(f"ℹ️ **Match sedang** — top similarity **{top_sim*100:.1f}%**")
+    elif filter_mode == "weak":
+        st.info(f"ℹ️ **Match lemah** — top similarity **{top_sim*100:.1f}%**")
 
     if not results:
-        st.warning(
-            "⚠️ Tidak ada hasil sama sekali. "
-            "Pastikan sudah ada PN yang di-index di tab **🧠 Image Index**."
-        )
+        if fallback:
+            best_sim = fallback[0]["similarity"] * 100
+            st.warning(
+                f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%**."
+            )
+            _render_card_grid(fallback, start_rank=1)
+        else:
+            st.warning(
+                "⚠️ Tidak ada hasil sama sekali. "
+                "Pastikan sudah ada PN yang di-index di tab **🧠 Image Index**."
+            )
         return
-
-    if not had_confident:
-        best_sim = results[0]["similarity"] * 100
-        st.warning(
-            f"⚠️ **Tidak ada match meyakinkan.** Kandidat terdekat hanya **{best_sim:.1f}%**."
-        )
 
     # ── Render semua hasil dalam grid 2 kolom ─────────────────────────────
     _render_card_grid(results, start_rank=1)
+
+    # Show dropped candidates di expander (transparansi — user tahu apa yang disaring)
+    if fallback:
+        st.markdown(
+            """
+            <div style="margin:14px 0 6px 0; color:#6b7280; font-size:12px;
+                        font-weight:600;">
+              🔎 Kandidat tambahan (low confidence)
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if filter_reason:
+            st.caption(f"Disaring karena: {filter_reason}")
+        _render_card_grid(fallback, start_rank=len(results) + 1)
 
 
 _CARD_IMG_MAX_PX      = 240   # tinggi foto dalam card hasil (regular)
