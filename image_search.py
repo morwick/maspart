@@ -1304,32 +1304,80 @@ def delete_pn_from_index(pn: str) -> bool:
         return False
 
 
+_STATS_SS_CACHE_KEY = "_img_search_stats_cache"
+
+
 def get_index_stats() -> dict:
-    """Statistik global index: total PN, total foto, last_indexed_at."""
-    default = {"total_pn": 0, "total_images": 0, "last_indexed_at": None}
+    """Statistik global index: total PN, total foto, last_indexed_at.
+
+    Tahan terhadap network hiccup: retry 3× pada error transien, lalu
+    fallback ke cache `st.session_state[_STATS_SS_CACHE_KEY]` (hasil sukses
+    terakhir) — sehingga klik pertama setelah idle tidak salah nampilin
+    "Belum ada PN yang di-index" cuma karena RPC pertama timeout.
+
+    Field tambahan `ok`:
+      - True  → hasil ini benar-benar dari RPC sukses (boleh dipercaya
+                untuk decision "index kosong vs tidak").
+      - False → fetch gagal; nilai 0 di sini BUKAN berarti index kosong,
+                hanya berarti server tidak bisa dihubungi saat ini.
+    """
+    default = {"total_pn": 0, "total_images": 0,
+               "last_indexed_at": None, "ok": False}
     if not _is_configured():
         return default
+
+    last_err: Optional[str] = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                _rpc_url(RPC_STATS),
+                headers=_rest_headers(use_service=True),
+                json={},
+                timeout=HTTP_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                # Retry hanya untuk error server-side (5xx) — 4xx kemungkinan
+                # config issue, nggak akan sembuh dengan retry.
+                if 500 <= resp.status_code < 600 and attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                break
+            rows = resp.json() or []
+            row  = rows[0] if rows and isinstance(rows, list) else (
+                   rows if isinstance(rows, dict) else {})
+            stats = {
+                "total_pn":        int(row.get("total_pn") or 0),
+                "total_images":    int(row.get("total_images") or 0),
+                "last_indexed_at": row.get("last_indexed_at"),
+                "ok":              True,
+            }
+            # Simpan hasil sukses ke session_state supaya fetch berikutnya
+            # yang transien-gagal bisa fallback ke nilai ini.
+            try:
+                if stats["total_pn"] > 0:
+                    st.session_state[_STATS_SS_CACHE_KEY] = stats
+            except Exception:
+                pass
+            return stats
+        except Exception as e:
+            last_err = str(e)
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1))
+                continue
+            break
+
+    print(f"[image_search] stats fetch failed after retries: {last_err}")
+    # Fallback ke cache sukses terakhir kalau ada — UI tidak boleh nampilin
+    # "Belum ada PN yang di-index" cuma karena network hiccup.
     try:
-        resp = requests.post(
-            _rpc_url(RPC_STATS),
-            headers=_rest_headers(use_service=True),
-            json={},
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            return default
-        rows = resp.json() or []
-        if not rows:
-            return default
-        row = rows[0] if isinstance(rows, list) else rows
-        return {
-            "total_pn":        int(row.get("total_pn") or 0),
-            "total_images":    int(row.get("total_images") or 0),
-            "last_indexed_at": row.get("last_indexed_at"),
-        }
-    except Exception as e:
-        print(f"[image_search] stats error: {e}")
-        return default
+        cached = st.session_state.get(_STATS_SS_CACHE_KEY)
+        if cached and int(cached.get("total_pn") or 0) > 0:
+            print("[image_search] using cached stats as fallback")
+            return {**cached, "ok": False}
+    except Exception:
+        pass
+    return default
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1358,9 +1406,12 @@ def _clear_global_pn_results() -> None:
 
 # Key state aktif yang TIDAK boleh dihapus oleh _clear_image_search_state.
 # Selain ini, semua `_img_search_*` boleh dihapus.
+# Catatan: `_img_search_stats_cache` (fallback get_index_stats) ikut dikecualikan
+# supaya tidak ikut wipe tiap kali user klik "Cari Part Sekarang".
 _IMG_SEARCH_KEEP_KEYS = frozenset({
     _SS_QUERY_BYTES, _SS_QUERY_NAME,
     _SS_PROCESSED_UPLOAD, _SS_PROCESSED_CAMERA, _SS_ACTIVE_SOURCE,
+    _STATS_SS_CACHE_KEY,
 })
 
 
@@ -1543,6 +1594,17 @@ def render_search_image_tab():
     # ── Statistik index sebagai pill compact ──────────────────────────────
     stats = get_index_stats()
     if stats["total_pn"] == 0:
+        # Bedakan "index benar-benar kosong" (ok=True) vs "fetch gagal"
+        # (ok=False) — fetch gagal jangan diperlakukan sama, biar user
+        # nggak harus klik dua kali kalau RPC pertama transien-error.
+        if not stats.get("ok", True):
+            st.warning(
+                "⚠️ Gagal memuat statistik index dari server "
+                "(kemungkinan network hiccup). Coba lagi sebentar."
+            )
+            if st.button("🔄 Coba lagi", key="img_search_retry_stats"):
+                st.rerun()
+            return
         st.info(
             "ℹ️ Belum ada PN yang di-index. "
             "Admin harus menambahkan PN di tab **🧠 Image Index** terlebih dahulu."
