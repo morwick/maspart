@@ -73,6 +73,11 @@ DEFAULT_THRESHOLD = 0.50   # similarity ≥ 50% (cosine distance ≤ 0.50)
                            # DINOv2 untuk visual similarity sparepart
                            # umumnya menghasilkan score 0.5–0.85, jadi 0.5 baseline OK.
 HTTP_TIMEOUT      = 20
+# Search RPC sering kena cold-start pgvector (index belum di-load ke memory
+# Postgres) — call pertama bisa makan 15–40 detik. Timeout di-set lebih
+# longgar dan kita retry sekali kalau request gagal/timeout.
+SEARCH_HTTP_TIMEOUT = 60
+SEARCH_RPC_RETRIES  = 1
 
 DINOV2_MODEL_NAME = "dinov2_vitb14"   # base size, 768 dim, ~85 MB
 DINOV2_REPO       = "facebookresearch/dinov2"
@@ -968,7 +973,8 @@ _AGG_BOOST_CAP       = 0.10   # boost maksimum +10%
 def search_by_image(image_bytes: bytes,
                     top_k: int = DEFAULT_TOP_K,
                     threshold: float = DEFAULT_THRESHOLD,
-                    use_tta: bool = False) -> list[dict]:
+                    use_tta: bool = False,
+                    on_retry=None) -> list[dict]:
     """
     Cari part berdasarkan foto query — DENGAN PN-level aggregate scoring.
 
@@ -1017,23 +1023,43 @@ def search_by_image(image_bytes: bytes,
     # Over-fetch: untuk aggregate per PN, butuh lebih banyak foto kandidat
     fetch_count = max(int(top_k) * _AGG_FETCH_MULT, _AGG_FETCH_MIN)
 
-    try:
-        resp = requests.post(
-            _rpc_url(RPC_SEARCH),
-            headers=_rest_headers(use_service=True),
-            json={
-                "query_embedding": _vec_to_str(query_vec),
-                "match_threshold": distance_threshold,
-                "match_count":     fetch_count,
-            },
-            timeout=HTTP_TIMEOUT,
-        )
-        if resp.status_code != 200:
+    rows: list[dict] = []
+    last_err = ""
+    for attempt in range(SEARCH_RPC_RETRIES + 1):
+        try:
+            resp = requests.post(
+                _rpc_url(RPC_SEARCH),
+                headers=_rest_headers(use_service=True),
+                json={
+                    "query_embedding": _vec_to_str(query_vec),
+                    "match_threshold": distance_threshold,
+                    "match_count":     fetch_count,
+                },
+                timeout=SEARCH_HTTP_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                rows = resp.json() or []
+                last_err = ""
+                break
+            last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
             print(f"[image_search] RPC search status={resp.status_code}: {resp.text[:200]}")
-            return []
-        rows = resp.json() or []
-    except Exception as e:
-        print(f"[image_search] RPC search error: {e}")
+            if resp.status_code not in _TRANSIENT_HTTP:
+                return []
+        except Exception as e:
+            last_err = f"exception: {e}"
+            print(f"[image_search] RPC search error: {e}")
+            if not _is_transient_exception(e):
+                return []
+
+        if attempt < SEARCH_RPC_RETRIES:
+            if on_retry is not None:
+                try:
+                    on_retry(attempt + 1, last_err)
+                except Exception:
+                    pass
+            _retry_sleep(attempt + 1)
+
+    if last_err:
         return []
 
     # ── Group per PN, simpan foto terbaik + statistik ──
@@ -1830,8 +1856,22 @@ def render_search_image_tab():
         # Bersihkan juga state image search lama (fallback, filter reason,
         # ambiguous, dst) supaya tidak akumulasi antar pencarian.
         _clear_image_search_state()
-        with st.spinner("🔍 Menghitung embedding & mencari di database..."):
+        with st.status(
+            "🔍 Menghitung embedding & mencari di database...",
+            expanded=False,
+        ) as _search_status:
             t0 = time.time()
+
+            def _on_search_retry(attempt: int, _err: str) -> None:
+                _search_status.update(
+                    label=(
+                        f"🐢 Database cold-start (pgvector belum hot) — "
+                        f"mencoba lagi (percobaan {attempt + 1}/"
+                        f"{SEARCH_RPC_RETRIES + 1})..."
+                    ),
+                    state="running",
+                )
+
             # Ambil kandidat mentah tanpa threshold — biar smart filter
             # punya distribusi lengkap untuk deteksi cliff/noise.
             raw = search_by_image(
@@ -1839,9 +1879,14 @@ def render_search_image_tab():
                 top_k=int(top_k),
                 threshold=0.0,
                 use_tta=bool(use_tta),
+                on_retry=_on_search_retry,
             )
             filtered = smart_filter_results(raw)
             elapsed  = time.time() - t0
+            _search_status.update(
+                label=f"✅ Selesai dalam {elapsed:.1f}s — {len(filtered['kept'])} cocok",
+                state="complete",
+            )
 
         st.session_state[_SS_RESULTS]                  = filtered["kept"]
         st.session_state["_img_search_fallback"]       = filtered["dropped"][:5]
