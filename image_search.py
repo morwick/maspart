@@ -1026,6 +1026,7 @@ def search_by_image(image_bytes: bytes,
     rows: list[dict] = []
     last_err = ""
     for attempt in range(SEARCH_RPC_RETRIES + 1):
+        retry_reason = ""
         try:
             resp = requests.post(
                 _rpc_url(RPC_SEARCH),
@@ -1040,21 +1041,31 @@ def search_by_image(image_bytes: bytes,
             if resp.status_code == 200:
                 rows = resp.json() or []
                 last_err = ""
-                break
-            last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
-            print(f"[image_search] RPC search status={resp.status_code}: {resp.text[:200]}")
-            if resp.status_code not in _TRANSIENT_HTTP:
-                return []
+                # Pgvector cold-start: RPC kadang return 200 + array kosong
+                # pada call pertama (index HNSW/IVFFlat belum di-load ke
+                # shared_buffers). Retry sekali — biasanya call kedua sudah
+                # hot dan return data. Hanya retry kalau ini attempt pertama.
+                if not rows and attempt < SEARCH_RPC_RETRIES:
+                    retry_reason = "rows kosong (kemungkinan pgvector cold-start)"
+                else:
+                    break
+            else:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                print(f"[image_search] RPC search status={resp.status_code}: {resp.text[:200]}")
+                if resp.status_code not in _TRANSIENT_HTTP:
+                    return []
+                retry_reason = last_err
         except Exception as e:
             last_err = f"exception: {e}"
             print(f"[image_search] RPC search error: {e}")
             if not _is_transient_exception(e):
                 return []
+            retry_reason = last_err
 
         if attempt < SEARCH_RPC_RETRIES:
             if on_retry is not None:
                 try:
-                    on_retry(attempt + 1, last_err)
+                    on_retry(attempt + 1, retry_reason)
                 except Exception:
                     pass
             _retry_sleep(attempt + 1)
@@ -1862,12 +1873,16 @@ def render_search_image_tab():
         ) as _search_status:
             t0 = time.time()
 
-            def _on_search_retry(attempt: int, _err: str) -> None:
+            def _on_search_retry(attempt: int, reason: str) -> None:
+                hint = (
+                    "index pgvector belum hot"
+                    if "kosong" in reason
+                    else "request gagal/timeout"
+                )
                 _search_status.update(
                     label=(
-                        f"🐢 Database cold-start (pgvector belum hot) — "
-                        f"mencoba lagi (percobaan {attempt + 1}/"
-                        f"{SEARCH_RPC_RETRIES + 1})..."
+                        f"🐢 Database cold-start ({hint}) — mencoba lagi "
+                        f"(percobaan {attempt + 1}/{SEARCH_RPC_RETRIES + 1})..."
                     ),
                     state="running",
                 )
