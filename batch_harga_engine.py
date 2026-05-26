@@ -365,6 +365,16 @@ def render_batch_harga_tab(b_rate: float | None = None):
         if key not in st.session_state:
             st.session_state[key] = default
 
+    # ── Migrasi: dedup _SS_PN_ORDER (legacy session sebelum dedup di input) ─
+    # Tanpa dedup, Total dihitung dengan duplikat tapi _SS_RESULTS unik →
+    # status nyangkut di "Dijeda 3,281/4,862" walau worker sudah selesai.
+    order_legacy = st.session_state.get(_SS_PN_ORDER) or []
+    if order_legacy:
+        order_unique = list(dict.fromkeys(order_legacy))
+        if len(order_unique) != len(order_legacy):
+            st.session_state[_SS_PN_ORDER] = order_unique
+            st.session_state[_SS_TOTAL]    = len(order_unique)
+
     # ── Auto-clear hasil lama setelah TTL ────────────────────────────────────
     # Kalau batch sudah selesai >TTL detik yang lalu dan user tidak balik
     # ke tab ini, bebasin RAM yang dipakai dict results.
@@ -432,7 +442,10 @@ def render_batch_harga_tab(b_rate: float | None = None):
                 if not full_job:
                     st.error("❌ Gagal memuat batch dari Supabase.")
                 else:
-                    pn_loaded   = list(full_job.get("pn_list") or [])
+                    pn_raw      = list(full_job.get("pn_list") or [])
+                    # Dedup supaya Total & Diproses konsisten (batch lama bisa
+                    # punya duplikat dari sebelum fitur dedup di input).
+                    pn_loaded   = list(dict.fromkeys(pn_raw))
                     res_loaded  = _load_progress(jid_pick)
                     st.session_state[_SS_JOB_ID]   = jid_pick
                     st.session_state[_SS_RESULTS]  = dict(res_loaded)
@@ -495,17 +508,28 @@ def render_batch_harga_tab(b_rate: float | None = None):
         if uploaded:
             try:
                 df_up  = pd.read_excel(uploaded, dtype=str, header=None)
-                pn_list = (
+                pn_raw = (
                     df_up.iloc[:, 0]
                     .dropna()
                     .str.strip()
                     .str.upper()
                     .tolist()
                 )
-                pn_list = [p for p in pn_list if p]
+                pn_raw = [p for p in pn_raw if p]
+                # Dedup sambil pertahankan urutan asli — kalau ada PN duplikat,
+                # Total & Diproses jadi mismatch (worker tetap proses dupes, dict
+                # menyimpan unique) sehingga status nyangkut di "Dijeda".
+                pn_list = list(dict.fromkeys(pn_raw))
+                dup_count = len(pn_raw) - len(pn_list)
                 input_label    = uploaded.name
                 input_mode_tag = "upload"
-                st.success(f"✅ {len(pn_list):,} Part Number terdeteksi dari file.")
+                if dup_count > 0:
+                    st.success(
+                        f"✅ {len(pn_list):,} Part Number unik terdeteksi "
+                        f"({dup_count:,} duplikat dibuang dari {len(pn_raw):,} baris)."
+                    )
+                else:
+                    st.success(f"✅ {len(pn_list):,} Part Number terdeteksi dari file.")
             except Exception as e:
                 st.error(f"Gagal membaca file: {e}")
     else:
@@ -517,12 +541,20 @@ def render_batch_harga_tab(b_rate: float | None = None):
             disabled=st.session_state[_SS_RUNNING],
         )
         if manual_text.strip():
-            pn_list = [p.strip().upper() for p in manual_text.splitlines() if p.strip()]
+            pn_raw = [p.strip().upper() for p in manual_text.splitlines() if p.strip()]
+            pn_list = list(dict.fromkeys(pn_raw))
+            dup_count = len(pn_raw) - len(pn_list)
             input_mode_tag = "manual"
             # Label: preview 1-2 PN pertama + total
             preview        = ", ".join(pn_list[:2])
             input_label    = f"Manual {len(pn_list)} PN ({preview}…)"
-            st.info(f"📝 {len(pn_list):,} Part Number siap dicari.")
+            if dup_count > 0:
+                st.info(
+                    f"📝 {len(pn_list):,} Part Number unik siap dicari "
+                    f"({dup_count:,} duplikat dibuang dari {len(pn_raw):,} baris)."
+                )
+            else:
+                st.info(f"📝 {len(pn_list):,} Part Number siap dicari.")
 
     # Effective list — kalau user habis resume batch lewat expander di atas,
     # input UI kosong tapi session_state[_SS_PN_ORDER] sudah terisi. Pakai itu
@@ -545,29 +577,41 @@ def render_batch_harga_tab(b_rate: float | None = None):
         # Hitung berapa yang belum diproses jika ada job aktif.
         # Optimasi: kalau job ini sudah ter-load di session_state, pakai itu
         # supaya tidak hit Supabase setiap rerun (~2 detik sekali saat batch jalan).
-        pending_count = 0
+        pending_count   = 0
+        all_done_flag   = False
         if effective_pn_list:
-            job_id_calc = _compute_job_id(effective_pn_list)
-            if (
-                st.session_state.get(_SS_JOB_ID) == job_id_calc
-                and st.session_state.get(_SS_RESULTS)
-            ):
-                existing = st.session_state[_SS_RESULTS]
+            job_id_calc      = _compute_job_id(effective_pn_list)
+            session_results  = st.session_state.get(_SS_RESULTS) or {}
+            effective_set    = set(effective_pn_list)
+            # Toleran job_id berbeda: kalau seluruh key di session adalah subset
+            # dari input efektif, anggap itu progress yang valid (mis. setelah
+            # dedup, hash list berubah tapi datanya sama).
+            if session_results and all(pn in effective_set for pn in session_results):
+                existing = session_results
+            elif st.session_state.get(_SS_JOB_ID) == job_id_calc and session_results:
+                existing = session_results
             else:
                 existing = _load_progress(job_id_calc)
             pending_count = len([p for p in effective_pn_list if p not in existing])
+            all_done_flag = bool(existing) and pending_count == 0
 
-        btn_label = (
-            f"▶️ Lanjutkan ({pending_count:,} sisa)"
-            if (effective_pn_list and pending_count < len(effective_pn_list) and pending_count > 0)
-            else f"🚀 Mulai Batch ({len(effective_pn_list):,} Part)"
-        )
+        if all_done_flag:
+            btn_label = f"✅ Selesai ({len(effective_pn_list):,} Part) — Reset untuk ulang"
+        elif effective_pn_list and 0 < pending_count < len(effective_pn_list):
+            btn_label = f"▶️ Lanjutkan ({pending_count:,} sisa)"
+        else:
+            btn_label = f"🚀 Mulai Batch ({len(effective_pn_list):,} Part)"
+
         run_clicked = st.button(
             btn_label,
             type="primary",
             use_container_width=True,
             key="bhe_run",
-            disabled=st.session_state[_SS_RUNNING] or not effective_pn_list,
+            disabled=(
+                st.session_state[_SS_RUNNING]
+                or not effective_pn_list
+                or all_done_flag
+            ),
         )
 
     with col_stop:
@@ -622,12 +666,22 @@ def render_batch_harga_tab(b_rate: float | None = None):
         if old_thread and old_thread.is_alive():
             old_thread.join(timeout=3)   # tunggu maks 3 detik
 
-        job_id = _compute_job_id(effective_pn_list)
+        new_job_id       = _compute_job_id(effective_pn_list)
+        session_results  = st.session_state.get(_SS_RESULTS) or {}
+        saved_job_id     = st.session_state.get(_SS_JOB_ID, "")
+        effective_set    = set(effective_pn_list)
 
-        # Load hasil yang sudah ada (resume)
-        existing_results = _load_progress(job_id)
-        done_pns         = set(existing_results.keys())
-        pn_pending       = [p for p in effective_pn_list if p not in done_pns]
+        # Kalau session_results valid untuk input ini (semua key ⊆ input),
+        # pakai itu langsung — supaya progress tidak hilang saat dedup migrasi
+        # mengubah hash job_id.
+        if session_results and all(pn in effective_set for pn in session_results):
+            existing_results = dict(session_results)
+            job_id           = saved_job_id or new_job_id
+        else:
+            job_id           = new_job_id
+            existing_results = _load_progress(job_id)
+        done_pns   = set(existing_results.keys())
+        pn_pending = [p for p in effective_pn_list if p not in done_pns]
 
         # Simpan ke session state
         st.session_state[_SS_JOB_ID]   = job_id
