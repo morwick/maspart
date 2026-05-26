@@ -19,6 +19,7 @@ Dimana b_rate adalah float kurs CNY→IDR.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -115,10 +116,28 @@ _progress_lock = threading.Lock()
 
 
 def _fetch_one(pn: str) -> dict:
-    """Fetch harga satu PN. Return dict hasil."""
+    """Fetch harga satu PN. Return dict hasil.
+
+    Jika PN punya suffix '/<digit>' (mis. 'WG9525880022/1' atau
+    'WG9525880022+011/1') dan tidak ditemukan, otomatis coba lagi
+    tanpa suffix tersebut.
+    """
     try:
         from sims_price_fetcher import get_sims_part_price
         price, err = get_sims_part_price(pn)
+
+        if price is None and re.search(r"/\d+$", pn):
+            fallback_pn = re.sub(r"/\d+$", "", pn)
+            price2, err2 = get_sims_part_price(fallback_pn)
+            if price2 is not None:
+                return {
+                    "pn":      pn,
+                    "price":   price2,
+                    "err":     f"(via {fallback_pn})",
+                    "ts":      time.strftime("%H:%M:%S"),
+                    "via_pn":  fallback_pn,
+                }
+
         return {"pn": pn, "price": price, "err": err, "ts": time.strftime("%H:%M:%S")}
     except Exception as ex:
         return {"pn": pn, "price": None, "err": str(ex), "ts": time.strftime("%H:%M:%S")}
@@ -456,6 +475,8 @@ def render_batch_harga_tab(b_rate: float | None = None):
                 # Part belum diproses (masih pending) — tampilkan sebagai pending
                 rows.append({
                     "Part Number":     pn,
+                    "PN Dicari":       "",
+                    "Mark /N Dihapus": "",
                     "Harga CNY (¥)":  "—",
                     "Harga IDR (Rp)": "—",
                     "Status":          "⏳ Menunggu",
@@ -463,11 +484,14 @@ def render_batch_harga_tab(b_rate: float | None = None):
                     "Waktu":           "",
                 })
                 continue
-            price = r.get("price")
-            err   = r.get("err") or ""
-            idr   = price * b_rate if (price is not None and b_rate) else None
+            price   = r.get("price")
+            err     = r.get("err") or ""
+            via_pn  = r.get("via_pn") or ""
+            idr     = price * b_rate if (price is not None and b_rate) else None
             rows.append({
                 "Part Number":     pn,
+                "PN Dicari":       via_pn if via_pn else pn,
+                "Mark /N Dihapus": "✔" if via_pn else "",
                 "Harga CNY (¥)":  f"{price:,.2f}" if price is not None else "—",
                 "Harga IDR (Rp)": f"Rp {idr:,.0f}" if idr is not None else "—",
                 "Status":          "✅ Ditemukan" if price is not None else "❌ Tidak Ditemukan",
@@ -498,6 +522,8 @@ def render_batch_harga_tab(b_rate: float | None = None):
             height=min(600, 56 + len(df_res) * 35),
             column_config={
                 "Part Number":     st.column_config.TextColumn("Part Number",     width="medium"),
+                "PN Dicari":       st.column_config.TextColumn("PN Dicari",       width="medium"),
+                "Mark /N Dihapus": st.column_config.TextColumn("Mark /N Dihapus", width="small"),
                 "Harga CNY (¥)":  st.column_config.TextColumn("Harga CNY (¥)",  width="small"),
                 "Harga IDR (Rp)": st.column_config.TextColumn("Harga IDR (Rp)", width="medium"),
                 "Status":          st.column_config.TextColumn("Status",          width="small"),
