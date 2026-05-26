@@ -1205,6 +1205,122 @@ class SupabaseBatchHarga:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  BATCH HARGA JOBS — Metadata setiap batch (untuk auto-restore)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tabel: batch_harga_jobs (lihat migrations/004_batch_harga_jobs.sql)
+#   job_id PK, pn_list jsonb, label, input_mode, total_pn, created_at, updated_at
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_BATCH_HARGA_JOBS_TABLE = "batch_harga_jobs"
+
+
+class SupabaseBatchHargaJobs:
+    """
+    Metadata setiap batch cari harga: menyimpan pn_list lengkap + label,
+    sehingga UI bisa auto-restore batch yang belum selesai tanpa user perlu
+    upload file Excel ulang / re-type list Part Number.
+    """
+
+    @staticmethod
+    def is_available() -> bool:
+        return SUPABASE_BATCH_HARGA_ENABLED and _is_configured()
+
+    @staticmethod
+    def save_job(
+        job_id: str,
+        pn_list: list,
+        label: str = "",
+        input_mode: str = "",
+    ) -> bool:
+        """Upsert metadata batch. Pakai resolution=merge-duplicates pada PK."""
+        if not job_id or not pn_list:
+            return False
+        payload = {
+            "job_id":     job_id,
+            "pn_list":    list(pn_list),
+            "label":      label or "",
+            "input_mode": input_mode or "",
+            "total_pn":   len(pn_list),
+            "updated_at": _opname_now_iso(),
+        }
+        try:
+            resp = requests.post(
+                _rest_url(_BATCH_HARGA_JOBS_TABLE),
+                headers={
+                    **_headers(),
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+                json=payload,
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            return resp.status_code in (200, 201, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga_jobs save '{job_id}': {e}")
+            return False
+
+    @staticmethod
+    def list_jobs(limit: int = 30) -> list:
+        """List batch terbaru — tanpa pn_list (untuk preview di UI).
+        Return list[dict]: job_id, label, input_mode, total_pn, created_at, updated_at.
+        """
+        try:
+            resp = requests.get(
+                _rest_url(_BATCH_HARGA_JOBS_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select": "job_id,label,input_mode,total_pn,created_at,updated_at",
+                    "order":  "updated_at.desc",
+                    "limit":  str(limit),
+                },
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            resp.raise_for_status()
+            return resp.json() or []
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga_jobs list: {e}")
+            return []
+
+    @staticmethod
+    def get_job(job_id: str) -> Optional[dict]:
+        """Ambil 1 job lengkap (termasuk pn_list)."""
+        if not job_id:
+            return None
+        try:
+            resp = requests.get(
+                _rest_url(_BATCH_HARGA_JOBS_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select": "*",
+                    "job_id": f"eq.{job_id}",
+                    "limit":  "1",
+                },
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            resp.raise_for_status()
+            rows = resp.json() or []
+            return rows[0] if rows else None
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga_jobs get '{job_id}': {e}")
+            return None
+
+    @staticmethod
+    def delete_job(job_id: str) -> bool:
+        if not job_id:
+            return False
+        try:
+            resp = requests.delete(
+                _rest_url(_BATCH_HARGA_JOBS_TABLE),
+                headers=_headers("return=minimal"),
+                params={"job_id": f"eq.{job_id}"},
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga_jobs delete '{job_id}': {e}")
+            return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CLI Test
 # ═══════════════════════════════════════════════════════════════════════════════
 

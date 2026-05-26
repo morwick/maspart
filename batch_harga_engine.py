@@ -30,11 +30,14 @@ import streamlit as st
 
 # ── Supabase (sumber utama progress, tahan restart container Streamlit Cloud)
 try:
-    from supabase import SupabaseBatchHarga
+    from supabase import SupabaseBatchHarga, SupabaseBatchHargaJobs
     _SB_BATCH_OK = SupabaseBatchHarga.is_available()
+    _SB_JOBS_OK  = SupabaseBatchHargaJobs.is_available()
 except Exception:
-    SupabaseBatchHarga = None      # type: ignore[assignment]
+    SupabaseBatchHarga     = None      # type: ignore[assignment]
+    SupabaseBatchHargaJobs = None      # type: ignore[assignment]
     _SB_BATCH_OK = False
+    _SB_JOBS_OK  = False
 
 # ── Konfigurasi ──────────────────────────────────────────────────────────────
 
@@ -156,19 +159,85 @@ def _save_one_result(job_id: str, pn: str, result: dict):
 
 
 def _clear_progress(job_id: str = ""):
-    """Hapus progress di Supabase (untuk job_id ini) + file lokal."""
-    # 1) Supabase
+    """Hapus progress + metadata di Supabase (untuk job_id ini) + file lokal."""
+    # 1) Supabase — progress per-PN
     if _SB_BATCH_OK and SupabaseBatchHarga is not None and job_id:
         try:
             SupabaseBatchHarga.clear(job_id)
         except Exception as e:
             print(f"[batch_harga_engine] Supabase clear gagal: {e}")
-    # 2) File lokal
+    # 2) Supabase — metadata batch (pn_list, label, …)
+    if _SB_JOBS_OK and SupabaseBatchHargaJobs is not None and job_id:
+        try:
+            SupabaseBatchHargaJobs.delete_job(job_id)
+        except Exception as e:
+            print(f"[batch_harga_engine] Supabase delete_job gagal: {e}")
+    # 3) File lokal
     try:
         if PROGRESS_FILE.exists():
             PROGRESS_FILE.unlink()
     except Exception:
         pass
+
+
+def _save_job_metadata(job_id: str, pn_list: list[str], label: str, input_mode: str):
+    """Simpan metadata batch (best-effort)."""
+    if not (_SB_JOBS_OK and SupabaseBatchHargaJobs is not None):
+        return
+    try:
+        SupabaseBatchHargaJobs.save_job(job_id, pn_list, label, input_mode)
+    except Exception as e:
+        print(f"[batch_harga_engine] Supabase save_job '{job_id}' gagal: {e}")
+
+
+def _list_saved_jobs() -> list[dict]:
+    """List batch tersimpan untuk UI 'Lanjutkan batch sebelumnya'."""
+    if not (_SB_JOBS_OK and SupabaseBatchHargaJobs is not None):
+        return []
+    try:
+        return SupabaseBatchHargaJobs.list_jobs(limit=30)
+    except Exception as e:
+        print(f"[batch_harga_engine] Supabase list_jobs gagal: {e}")
+        return []
+
+
+def _fetch_full_job(job_id: str) -> dict | None:
+    """Ambil 1 job lengkap (termasuk pn_list) dari Supabase."""
+    if not (_SB_JOBS_OK and SupabaseBatchHargaJobs is not None):
+        return None
+    try:
+        return SupabaseBatchHargaJobs.get_job(job_id)
+    except Exception as e:
+        print(f"[batch_harga_engine] Supabase get_job '{job_id}' gagal: {e}")
+        return None
+
+
+def _format_ago(iso_ts: str) -> str:
+    """Format ISO timestamp jadi 'X menit lalu' / 'X jam lalu' / tanggal."""
+    if not iso_ts:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        ts = iso_ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - dt
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return f"{secs}d lalu"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins} menit lalu"
+        hrs = mins // 60
+        if hrs < 24:
+            return f"{hrs} jam lalu"
+        days = hrs // 24
+        if days < 30:
+            return f"{days} hari lalu"
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return iso_ts
 
 
 def _compute_job_id(pn_list: list[str]) -> str:
@@ -316,6 +385,93 @@ def render_batch_harga_tab(b_rate: float | None = None):
         st.session_state[_SS_JOB_ID]  = ""
         st.session_state[_SS_PN_ORDER] = []
 
+    # ── Resume Batch Sebelumnya (dari Supabase) ─────────────────────────────
+    saved_jobs = _list_saved_jobs() if not st.session_state[_SS_RUNNING] else []
+    if saved_jobs:
+        with st.expander(
+            f"🕘 Lanjutkan Batch Sebelumnya ({len(saved_jobs)} tersimpan)",
+            expanded=False,
+        ):
+            options: list[str] = []
+            opt_map: dict[str, str] = {}
+            for job in saved_jobs:
+                jid    = job.get("job_id", "")
+                label  = (job.get("label") or "").strip()
+                imode  = job.get("input_mode") or ""
+                total  = int(job.get("total_pn") or 0)
+                ago    = _format_ago(job.get("updated_at") or "")
+                icon   = "📁" if imode == "upload" else "⌨️"
+                title  = label or f"{icon} Manual {total} PN"
+                display = f"{icon} {title}  •  {total:,} part  •  {ago}"
+                options.append(display)
+                opt_map[display] = jid
+
+            selected = st.selectbox(
+                "Pilih batch untuk dilanjutkan:",
+                options,
+                key="bhe_resume_select",
+            )
+            col_load, col_del = st.columns([3, 1])
+            with col_load:
+                load_clicked = st.button(
+                    "📥 Muat Batch Ini",
+                    key="bhe_resume_load",
+                    use_container_width=True,
+                    type="primary",
+                )
+            with col_del:
+                del_clicked = st.button(
+                    "🗑️ Hapus",
+                    key="bhe_resume_del",
+                    use_container_width=True,
+                )
+
+            if load_clicked and selected:
+                jid_pick  = opt_map[selected]
+                full_job  = _fetch_full_job(jid_pick)
+                if not full_job:
+                    st.error("❌ Gagal memuat batch dari Supabase.")
+                else:
+                    pn_loaded   = list(full_job.get("pn_list") or [])
+                    res_loaded  = _load_progress(jid_pick)
+                    st.session_state[_SS_JOB_ID]   = jid_pick
+                    st.session_state[_SS_RESULTS]  = dict(res_loaded)
+                    st.session_state[_SS_PN_ORDER] = pn_loaded
+                    st.session_state[_SS_TOTAL]    = len(pn_loaded)
+                    st.session_state[_SS_DONE]     = len(res_loaded)
+                    st.session_state[_SS_ERRORS]   = sum(
+                        1 for r in res_loaded.values() if r.get("price") is None
+                    )
+                    # Stash label/mode supaya bisa re-passed saat Lanjutkan,
+                    # tanpa harus tipu Supabase berisi string kosong.
+                    st.session_state["bhe_resume_label"] = full_job.get("label") or ""
+                    st.session_state["bhe_resume_mode"]  = full_job.get("input_mode") or ""
+                    st.session_state.pop(_SS_COMPLETED_AT, None)
+                    st.toast(
+                        f"✅ Dimuat {len(res_loaded):,}/{len(pn_loaded):,} part",
+                        icon="📥",
+                    )
+                    st.rerun()
+
+            if del_clicked and selected:
+                jid_pick = opt_map[selected]
+                _clear_progress(jid_pick)
+                # Kalau yang dihapus = job aktif di session, bersihkan juga
+                if st.session_state.get(_SS_JOB_ID) == jid_pick:
+                    for key in (_SS_RESULTS, _SS_TOTAL, _SS_DONE, _SS_ERRORS,
+                                _SS_JOB_ID, _SS_PN_ORDER, _SS_COMPLETED_AT):
+                        st.session_state.pop(key, None)
+                    st.session_state[_SS_RESULTS] = {}
+                    st.session_state[_SS_TOTAL]   = 0
+                    st.session_state[_SS_DONE]    = 0
+                    st.session_state[_SS_ERRORS]  = 0
+                    st.session_state[_SS_JOB_ID]  = ""
+                    st.session_state[_SS_PN_ORDER] = []
+                st.toast("🗑️ Batch dihapus.", icon="🗑️")
+                st.rerun()
+
+        st.divider()
+
     # ── Input ────────────────────────────────────────────────────────────────
     input_mode = st.radio(
         "Metode Input:",
@@ -326,6 +482,8 @@ def render_batch_harga_tab(b_rate: float | None = None):
     )
 
     pn_list: list[str] = []
+    input_label: str = ""        # nama file / preview manual — untuk display
+    input_mode_tag: str = ""     # "upload" | "manual" — disimpan ke jobs table
 
     if input_mode == "📁 Upload File Excel":
         uploaded = st.file_uploader(
@@ -345,6 +503,8 @@ def render_batch_harga_tab(b_rate: float | None = None):
                     .tolist()
                 )
                 pn_list = [p for p in pn_list if p]
+                input_label    = uploaded.name
+                input_mode_tag = "upload"
                 st.success(f"✅ {len(pn_list):,} Part Number terdeteksi dari file.")
             except Exception as e:
                 st.error(f"Gagal membaca file: {e}")
@@ -358,7 +518,23 @@ def render_batch_harga_tab(b_rate: float | None = None):
         )
         if manual_text.strip():
             pn_list = [p.strip().upper() for p in manual_text.splitlines() if p.strip()]
+            input_mode_tag = "manual"
+            # Label: preview 1-2 PN pertama + total
+            preview        = ", ".join(pn_list[:2])
+            input_label    = f"Manual {len(pn_list)} PN ({preview}…)"
             st.info(f"📝 {len(pn_list):,} Part Number siap dicari.")
+
+    # Effective list — kalau user habis resume batch lewat expander di atas,
+    # input UI kosong tapi session_state[_SS_PN_ORDER] sudah terisi. Pakai itu
+    # supaya tombol Lanjutkan & handler run muncul tanpa user perlu input ulang.
+    effective_pn_list: list[str] = pn_list or list(st.session_state.get(_SS_PN_ORDER) or [])
+    resumed_from_history: bool = bool(effective_pn_list) and not pn_list
+
+    if resumed_from_history:
+        st.info(
+            f"📌 Batch dimuat dari riwayat — {len(effective_pn_list):,} part total. "
+            f"Klik **Lanjutkan** untuk meneruskan."
+        )
 
     st.divider()
 
@@ -370,8 +546,8 @@ def render_batch_harga_tab(b_rate: float | None = None):
         # Optimasi: kalau job ini sudah ter-load di session_state, pakai itu
         # supaya tidak hit Supabase setiap rerun (~2 detik sekali saat batch jalan).
         pending_count = 0
-        if pn_list:
-            job_id_calc = _compute_job_id(pn_list)
+        if effective_pn_list:
+            job_id_calc = _compute_job_id(effective_pn_list)
             if (
                 st.session_state.get(_SS_JOB_ID) == job_id_calc
                 and st.session_state.get(_SS_RESULTS)
@@ -379,19 +555,19 @@ def render_batch_harga_tab(b_rate: float | None = None):
                 existing = st.session_state[_SS_RESULTS]
             else:
                 existing = _load_progress(job_id_calc)
-            pending_count = len([p for p in pn_list if p not in existing])
+            pending_count = len([p for p in effective_pn_list if p not in existing])
 
         btn_label = (
             f"▶️ Lanjutkan ({pending_count:,} sisa)"
-            if (pn_list and pending_count < len(pn_list) and pending_count > 0)
-            else f"🚀 Mulai Batch ({len(pn_list):,} Part)"
+            if (effective_pn_list and pending_count < len(effective_pn_list) and pending_count > 0)
+            else f"🚀 Mulai Batch ({len(effective_pn_list):,} Part)"
         )
         run_clicked = st.button(
             btn_label,
             type="primary",
             use_container_width=True,
             key="bhe_run",
-            disabled=st.session_state[_SS_RUNNING] or not pn_list,
+            disabled=st.session_state[_SS_RUNNING] or not effective_pn_list,
         )
 
     with col_stop:
@@ -416,7 +592,7 @@ def render_batch_harga_tab(b_rate: float | None = None):
         # Clear progress untuk job aktif di session, atau job dari input
         # yang sedang ada (mana saja yang relevan).
         job_to_clear = st.session_state.get(_SS_JOB_ID, "") or (
-            _compute_job_id(pn_list) if pn_list else ""
+            _compute_job_id(effective_pn_list) if effective_pn_list else ""
         )
         _clear_progress(job_to_clear)
         for key in [_SS_RUNNING, _SS_STOP_FLAG, _SS_RESULTS, _SS_TOTAL,
@@ -437,7 +613,7 @@ def render_batch_harga_tab(b_rate: float | None = None):
         st.toast("⏸️ Proses dijeda. Klik ▶️ Lanjutkan untuk melanjutkan.", icon="⏸️")
         st.rerun()
 
-    if run_clicked and pn_list:
+    if run_clicked and effective_pn_list:
         # ── FIX: hentikan thread lama jika masih hidup ──
         old_stop_event: threading.Event | None = st.session_state.get("bhe_stop_event")
         if old_stop_event is not None:
@@ -446,19 +622,19 @@ def render_batch_harga_tab(b_rate: float | None = None):
         if old_thread and old_thread.is_alive():
             old_thread.join(timeout=3)   # tunggu maks 3 detik
 
-        job_id = _compute_job_id(pn_list)
+        job_id = _compute_job_id(effective_pn_list)
 
         # Load hasil yang sudah ada (resume)
         existing_results = _load_progress(job_id)
         done_pns         = set(existing_results.keys())
-        pn_pending       = [p for p in pn_list if p not in done_pns]
+        pn_pending       = [p for p in effective_pn_list if p not in done_pns]
 
         # Simpan ke session state
         st.session_state[_SS_JOB_ID]   = job_id
         st.session_state[_SS_RESULTS]  = dict(existing_results)
-        st.session_state[_SS_TOTAL]    = len(pn_list)
+        st.session_state[_SS_TOTAL]    = len(effective_pn_list)
         st.session_state[_SS_DONE]     = len(done_pns)
-        st.session_state[_SS_PN_ORDER] = pn_list          # ← simpan urutan asli input
+        st.session_state[_SS_PN_ORDER] = effective_pn_list  # ← simpan urutan asli input
         st.session_state[_SS_ERRORS]   = sum(
             1 for r in existing_results.values() if r.get("price") is None
         )
@@ -468,6 +644,16 @@ def render_batch_harga_tab(b_rate: float | None = None):
         # Reset completion timestamp — supaya auto-clear tidak salah trigger
         # selama batch baru ini jalan.
         st.session_state.pop(_SS_COMPLETED_AT, None)
+
+        # Simpan / refresh metadata batch ke Supabase. Saat fresh input pakai
+        # label & mode dari input UI; saat resume dari riwayat pakai yang sudah
+        # disimpan supaya tidak ditimpa string kosong.
+        if pn_list:
+            _save_job_metadata(job_id, effective_pn_list, input_label, input_mode_tag)
+        else:
+            saved_label = st.session_state.get("bhe_resume_label", "") or ""
+            saved_mode  = st.session_state.get("bhe_resume_mode", "")  or ""
+            _save_job_metadata(job_id, effective_pn_list, saved_label, saved_mode)
 
         if not pn_pending:
             st.success("✅ Semua part sudah diproses! Klik 🗑️ Reset untuk memulai ulang.")
