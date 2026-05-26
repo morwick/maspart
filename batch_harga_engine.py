@@ -28,9 +28,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+# ── Supabase (sumber utama progress, tahan restart container Streamlit Cloud)
+try:
+    from supabase import SupabaseBatchHarga
+    _SB_BATCH_OK = SupabaseBatchHarga.is_available()
+except Exception:
+    SupabaseBatchHarga = None      # type: ignore[assignment]
+    _SB_BATCH_OK = False
+
 # ── Konfigurasi ──────────────────────────────────────────────────────────────
 
-# Lokasi file progress/cache — persisten lintas rerun
+# Lokasi file progress/cache — backup lokal kalau Supabase down
 PROGRESS_FILE = Path("images") / "batch_harga_progress.json"
 
 # Jumlah request concurrent (naikan jika server tidak throttle)
@@ -69,8 +77,8 @@ _BATCH_RESULT_TTL = 600   # 10 menit
 
 # ── Persistensi Progress ─────────────────────────────────────────────────────
 
-def _load_progress(job_id: str) -> dict:
-    """Baca hasil yang sudah tersimpan untuk job_id ini."""
+def _load_file_progress(job_id: str) -> dict:
+    """Baca progress dari file lokal (backup/fallback)."""
     PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not PROGRESS_FILE.exists():
         return {}
@@ -84,18 +92,78 @@ def _load_progress(job_id: str) -> dict:
     return {}
 
 
-def _save_progress(job_id: str, results: dict):
-    """Simpan progress ke disk (thread-safe via lock)."""
+def _save_file_progress(job_id: str, results: dict):
+    """Simpan seluruh dict ke file lokal (backup)."""
     PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
             json.dump({"job_id": job_id, "results": results}, f, ensure_ascii=False)
     except Exception as e:
-        print(f"[batch_harga_engine] Gagal simpan progress: {e}")
+        print(f"[batch_harga_engine] Gagal simpan file lokal: {e}")
 
 
-def _clear_progress():
-    """Hapus file progress."""
+def _load_progress(job_id: str) -> dict:
+    """Baca hasil yang sudah tersimpan untuk job_id ini.
+
+    Strategi:
+      1. Coba Supabase dulu (sumber utama, tahan restart container)
+      2. Fallback ke file lokal kalau Supabase kosong/gagal
+      3. Auto-migrasi: kalau Supabase kosong tapi file punya data,
+         dorong file ke Supabase agar persisten di run berikutnya.
+    """
+    sb_data: dict = {}
+    if _SB_BATCH_OK and SupabaseBatchHarga is not None:
+        try:
+            sb_data = SupabaseBatchHarga.load_progress(job_id)
+        except Exception as e:
+            print(f"[batch_harga_engine] Supabase load gagal, fallback ke file: {e}")
+
+    file_data = _load_file_progress(job_id)
+
+    # Auto-migrasi file → Supabase sekali (kalau Supabase aktif tapi kosong)
+    if (
+        _SB_BATCH_OK
+        and SupabaseBatchHarga is not None
+        and not sb_data
+        and file_data
+    ):
+        try:
+            if SupabaseBatchHarga.save_many(job_id, file_data):
+                print(f"[batch_harga_engine] ✅ Migrasi {len(file_data)} entri "
+                      f"ke Supabase untuk job '{job_id}'.")
+                sb_data = file_data
+        except Exception as e:
+            print(f"[batch_harga_engine] Migrasi ke Supabase gagal: {e}")
+
+    return sb_data or file_data
+
+
+def _save_progress(job_id: str, results: dict):
+    """Simpan seluruh snapshot — hanya ke file lokal (backup).
+    Update per-PN ke Supabase dilakukan via _save_one_result() di worker.
+    """
+    _save_file_progress(job_id, results)
+
+
+def _save_one_result(job_id: str, pn: str, result: dict):
+    """Simpan satu hasil PN ke Supabase (best-effort)."""
+    if not (_SB_BATCH_OK and SupabaseBatchHarga is not None):
+        return
+    try:
+        SupabaseBatchHarga.save_one(job_id, pn, result)
+    except Exception as e:
+        print(f"[batch_harga_engine] Supabase save '{pn}' gagal: {e}")
+
+
+def _clear_progress(job_id: str = ""):
+    """Hapus progress di Supabase (untuk job_id ini) + file lokal."""
+    # 1) Supabase
+    if _SB_BATCH_OK and SupabaseBatchHarga is not None and job_id:
+        try:
+            SupabaseBatchHarga.clear(job_id)
+        except Exception as e:
+            print(f"[batch_harga_engine] Supabase clear gagal: {e}")
+    # 2) File lokal
     try:
         if PROGRESS_FILE.exists():
             PROGRESS_FILE.unlink()
@@ -169,8 +237,11 @@ def _worker_thread(
                 pn     = result["pn"]
                 with _progress_lock:
                     results_ref[pn] = result
-                    # Simpan ke disk setiap kali ada hasil baru
-                    _save_progress(job_id, dict(results_ref))
+                    snapshot = dict(results_ref)
+                # Network/disk write di luar lock supaya tidak block
+                # worker lain saat MAX_WORKERS > 1.
+                _save_one_result(job_id, pn, result)   # Supabase (per-PN)
+                _save_progress(job_id, snapshot)        # File lokal (backup)
 
         if not stop_event.is_set() and idx < total_pending:
             time.sleep(BATCH_PAUSE_SEC)
@@ -295,11 +366,19 @@ def render_batch_harga_tab(b_rate: float | None = None):
     col_run, col_stop, col_reset = st.columns([2, 1, 1])
 
     with col_run:
-        # Hitung berapa yang belum diproses jika ada job aktif
+        # Hitung berapa yang belum diproses jika ada job aktif.
+        # Optimasi: kalau job ini sudah ter-load di session_state, pakai itu
+        # supaya tidak hit Supabase setiap rerun (~2 detik sekali saat batch jalan).
         pending_count = 0
         if pn_list:
-            job_id = _compute_job_id(pn_list)
-            existing = _load_progress(job_id)
+            job_id_calc = _compute_job_id(pn_list)
+            if (
+                st.session_state.get(_SS_JOB_ID) == job_id_calc
+                and st.session_state.get(_SS_RESULTS)
+            ):
+                existing = st.session_state[_SS_RESULTS]
+            else:
+                existing = _load_progress(job_id_calc)
             pending_count = len([p for p in pn_list if p not in existing])
 
         btn_label = (
@@ -334,7 +413,12 @@ def render_batch_harga_tab(b_rate: float | None = None):
     # ── Handle tombol ────────────────────────────────────────────────────────
 
     if reset_clicked:
-        _clear_progress()
+        # Clear progress untuk job aktif di session, atau job dari input
+        # yang sedang ada (mana saja yang relevan).
+        job_to_clear = st.session_state.get(_SS_JOB_ID, "") or (
+            _compute_job_id(pn_list) if pn_list else ""
+        )
+        _clear_progress(job_to_clear)
         for key in [_SS_RUNNING, _SS_STOP_FLAG, _SS_RESULTS, _SS_TOTAL,
                     _SS_DONE, _SS_ERRORS, _SS_JOB_ID, _SS_LAST_UPDATE,
                     _SS_PN_ORDER, _SS_COMPLETED_AT]:
@@ -568,6 +652,11 @@ def render_batch_harga_tab(b_rate: float | None = None):
 
     # ── Tips ────────────────────────────────────────────────────────────────
     with st.expander("ℹ️ Cara Kerja & Tips", expanded=False):
+        storage_info = (
+            "☁️ **Supabase** (utama) + 💾 file lokal (backup)"
+            if _SB_BATCH_OK
+            else "💾 File lokal `images/batch_harga_progress.json`"
+        )
         st.markdown(f"""
         **Fitur utama:**
         - 🔄 **Non-blocking** — UI tetap responsif selama proses berjalan
@@ -584,5 +673,5 @@ def render_batch_harga_tab(b_rate: float | None = None):
         - Kolom pertama file Excel harus berisi Part Number (bisa ada header, akan di-skip otomatis jika bukan Part Number valid)
         - Hapus duplikat dari list sebelum upload untuk menghemat waktu
         - Gunakan **Pause** jika ingin menggunakan app sementara, lalu **Lanjutkan** setelah selesai
-        - Progress tersimpan di `images/batch_harga_progress.json` — aman meski window ditutup
+        - Penyimpanan progress: {storage_info} — tahan refresh, restart container, dan tutup browser
         """)

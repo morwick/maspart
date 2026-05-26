@@ -1045,6 +1045,166 @@ class SupabaseOpname:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  BATCH HARGA — Progress per job_id
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tabel: batch_harga_progress  (lihat migrations/003_batch_harga.sql)
+#   id, job_id, pn, price, err, via_pn, ts, updated_at
+#   UNIQUE (job_id, pn)  → dipakai untuk upsert per-PN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_BATCH_HARGA_TABLE   = "batch_harga_progress"
+_BATCH_HARGA_TIMEOUT = 15
+
+SUPABASE_BATCH_HARGA_ENABLED = _is_configured()
+
+
+class SupabaseBatchHarga:
+    """
+    REST CRUD untuk progress batch cari harga.
+    Setiap PN disimpan sebagai 1 row (job_id, pn) → memungkinkan
+    resume tahan restart container Streamlit Cloud.
+
+    Public API mengikuti modul batch_harga_engine (drop-in replacement
+    untuk file JSON lokal):
+      load_progress / save_one / clear
+    """
+
+    @staticmethod
+    def is_available() -> bool:
+        return SUPABASE_BATCH_HARGA_ENABLED and _is_configured()
+
+    @staticmethod
+    def load_progress(job_id: str) -> dict:
+        """Ambil semua hasil yang sudah tersimpan untuk job_id ini.
+        Return {pn: {pn, price, err, via_pn, ts}}.
+        """
+        if not job_id:
+            return {}
+        try:
+            resp = requests.get(
+                _rest_url(_BATCH_HARGA_TABLE),
+                headers={**_headers(), "Accept": "application/json"},
+                params={
+                    "select": "pn,price,err,via_pn,ts",
+                    "job_id": f"eq.{job_id}",
+                },
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            resp.raise_for_status()
+            result: dict = {}
+            for row in resp.json():
+                pn = row.get("pn") or ""
+                if not pn:
+                    continue
+                price = row.get("price")
+                if price is not None:
+                    try:
+                        price = float(price)
+                    except (TypeError, ValueError):
+                        price = None
+                entry = {
+                    "pn":    pn,
+                    "price": price,
+                    "err":   row.get("err"),
+                    "ts":    row.get("ts") or "",
+                }
+                via_pn = row.get("via_pn")
+                if via_pn:
+                    entry["via_pn"] = via_pn
+                result[pn] = entry
+            return result
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga load '{job_id}': {e}")
+            return {}
+
+    @staticmethod
+    def save_one(job_id: str, pn: str, result: dict) -> bool:
+        """
+        Upsert satu hasil PN ke Supabase.
+        Pakai header `Prefer: resolution=merge-duplicates` agar UPSERT
+        otomatis berdasarkan UNIQUE(job_id, pn).
+        """
+        if not job_id or not pn:
+            return False
+        payload = {
+            "job_id":     job_id,
+            "pn":         pn,
+            "price":      result.get("price"),
+            "err":        result.get("err"),
+            "via_pn":     result.get("via_pn"),
+            "ts":         result.get("ts") or "",
+            "updated_at": _opname_now_iso(),
+        }
+        try:
+            resp = requests.post(
+                _rest_url(_BATCH_HARGA_TABLE),
+                headers={
+                    **_headers(),
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+                json=payload,
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            return resp.status_code in (200, 201, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga save '{job_id}/{pn}': {e}")
+            return False
+
+    @staticmethod
+    def save_many(job_id: str, results: dict) -> bool:
+        """Bulk upsert (untuk migrasi awal dari file JSON lokal)."""
+        if not job_id or not results:
+            return False
+        now = _opname_now_iso()
+        rows = []
+        for pn, r in results.items():
+            if not pn:
+                continue
+            rows.append({
+                "job_id":     job_id,
+                "pn":         pn,
+                "price":      r.get("price"),
+                "err":        r.get("err"),
+                "via_pn":     r.get("via_pn"),
+                "ts":         r.get("ts") or "",
+                "updated_at": now,
+            })
+        if not rows:
+            return False
+        try:
+            resp = requests.post(
+                _rest_url(_BATCH_HARGA_TABLE),
+                headers={
+                    **_headers(),
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+                json=rows,
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            return resp.status_code in (200, 201, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga save_many '{job_id}': {e}")
+            return False
+
+    @staticmethod
+    def clear(job_id: str) -> bool:
+        """Hapus semua hasil untuk job_id ini."""
+        if not job_id:
+            return False
+        try:
+            resp = requests.delete(
+                _rest_url(_BATCH_HARGA_TABLE),
+                headers=_headers("return=minimal"),
+                params={"job_id": f"eq.{job_id}"},
+                timeout=_BATCH_HARGA_TIMEOUT,
+            )
+            return resp.status_code in (200, 204)
+        except Exception as e:
+            print(f"[supabase] ❌ batch_harga clear '{job_id}': {e}")
+            return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CLI Test
 # ═══════════════════════════════════════════════════════════════════════════════
 
