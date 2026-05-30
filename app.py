@@ -3083,6 +3083,65 @@ class ExcelSearchApp:
             except Exception as e:
                 st.error(f"Gagal render gambar B: {e}")
 
+        # ── Semua gambar — versus berdampingan ───────────────────────
+        st.markdown(
+            '<div style="margin:18px 0 8px;">'
+            '<div style="font-size:14px;font-weight:700;color:var(--mp-ink);">'
+            '🖼️ Semua Gambar — <span style="color:var(--mp-green);">Versus</span></div>'
+            '<div style="font-size:12px;color:var(--mp-ink-50);margin-top:2px;">'
+            f'Bandingkan seluruh foto SIMS dari kedua part secara visual '
+            f'(<b>{len([b for b in bytes1 if b])}</b> foto {pn1} vs '
+            f'<b>{len([b for b in bytes2 if b])}</b> foto {pn2}). '
+            'Pasangan terbaik diberi badge hijau.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        def _render_all_images_column(pn, all_bytes, all_urls, best_idx, side_label):
+            st.markdown(
+                f"<div style='font-size:13px;font-weight:700;color:var(--mp-ink);"
+                f"padding:6px 10px;background:var(--mp-green-softer);"
+                f"border:1px solid var(--mp-green-line);border-radius:8px;"
+                f"margin-bottom:8px;'>{side_label} <code>{pn}</code> "
+                f"<span style='color:var(--mp-ink-50);font-weight:500;'>"
+                f"· {len([b for b in all_bytes if b])} gambar</span></div>",
+                unsafe_allow_html=True,
+            )
+            for idx, b in enumerate(all_bytes):
+                is_best = (idx == best_idx)
+                badge = (
+                    "<span style='background:var(--mp-green);color:white;"
+                    "font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;"
+                    "letter-spacing:.05em;'>★ TERBAIK</span>"
+                    if is_best else ""
+                )
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;margin:10px 0 4px;'>"
+                    f"<span style='font-size:12px;font-weight:600;color:var(--mp-ink-70);'>"
+                    f"Gambar #{idx+1}/{len(all_bytes)}</span>{badge}</div>",
+                    unsafe_allow_html=True,
+                )
+                if not b:
+                    st.markdown(
+                        "<div style='padding:24px;text-align:center;"
+                        "background:#FEF2F2;color:#991B1B;border:1px dashed #FCA5A5;"
+                        "border-radius:8px;font-size:12px;'>"
+                        "❌ Gagal mengunduh gambar</div>",
+                        unsafe_allow_html=True,
+                    )
+                    continue
+                try:
+                    st.image(b, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Gagal render gambar #{idx+1}: {e}")
+
+        all_col_a, all_col_b = st.columns(2)
+        with all_col_a:
+            _render_all_images_column(pn1, bytes1, urls1, best["i"], "🅰️")
+        with all_col_b:
+            _render_all_images_column(pn2, bytes2, urls2, best["j"], "🅱️")
+
         # ── Detail sub-metrik shape & color ──────────────────────────
         with st.expander("📊 Detail Sub-Metrik (bentuk & warna)"):
             metrics = best["metrics"]
