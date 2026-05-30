@@ -1400,7 +1400,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-SESSION_TIMEOUT_MINUTES = 75
+SESSION_TIMEOUT_MINUTES = 720  # 12 jam
 LOGIN_FOLDER    = Path("login")
 DATA_FOLDER     = Path("data")
 CACHE_FOLDER    = Path(".cache")
@@ -1671,7 +1671,7 @@ def render_login_page(login_mgr: LoginManager):
             'padding:28px;box-shadow:0 10px 40px rgba(15,26,18,.08), 0 2px 6px rgba(15,26,18,.04);">'
             '<div style="font-size:18px;font-weight:700;letter-spacing:-.01em;">Masuk ke akun Anda</div>'
             f'<div style="font-size:12.5px;color:var(--mp-ink-50);margin-top:4px;">'
-            f'Sesi aktif {SESSION_TIMEOUT_MINUTES} menit setelah login.</div>'
+            f'Sesi aktif {SESSION_TIMEOUT_MINUTES // 60} jam setelah login.</div>'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -4303,7 +4303,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 f'<div class="name">{uname.title()}</div>'
                 f'<div class="meta">'
                 f'<span class="role-pill {role_class}">{role.upper()}</span>'
-                f' · {login_str} · timeout {SESSION_TIMEOUT_MINUTES}m'
+                f' · {login_str} · timeout {SESSION_TIMEOUT_MINUTES // 60}h'
                 f'</div>'
                 f'</div>'
                 f'</div>'
