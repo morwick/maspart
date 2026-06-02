@@ -44,7 +44,7 @@ DATASETS: dict = {
         "bucket":       "data",
         "remote_path":  "stok.xlsx",
         "local_path":   Path("data/stok/stok.xlsx"),
-        "session_keys": ["stok_data"],
+        "session_keys": ["stok_data", "stok_gudang_data", "stok_gudang_names"],
     },
     "harga": {
         "label":        "Harga",

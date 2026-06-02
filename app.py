@@ -98,6 +98,18 @@ except ImportError:
     STOK_OPNAME_ENABLED = False
     _so = None
 
+# ── Konfigurasi Gudang (akun → cabang + stok terdekat) ───────────────
+try:
+    from gudang_config import (
+        gudang_for_user, fallback_order, gudang_label,
+    )
+    GUDANG_CONFIG_ENABLED = True
+except ImportError:
+    GUDANG_CONFIG_ENABLED = False
+    gudang_for_user = lambda u, r: None          # noqa: E731 — default: lihat semua
+    fallback_order  = lambda own, allg: []        # noqa: E731
+    gudang_label    = lambda g: g                 # noqa: E731
+
 
 warnings.filterwarnings('ignore')
 
@@ -1540,6 +1552,7 @@ class LoginManager:
         STATIC_KEYS = (
             "excel_files", "index_data", "search_results",
             "harga_data", "harga_lookup", "stok_data",
+            "stok_gudang_data", "stok_gudang_names",
             "last_index_time", "loaded_files_count", "last_file_count",
             "file_hashes", "search_type", "search_term",
             "_pn_scroll_to_image", "_img_idx_results_ts",
@@ -1702,6 +1715,121 @@ def render_login_page(login_mgr: LoginManager):
         else:
             st.session_state["login_error"] = "Username atau password salah."
             st.rerun()
+
+
+# ── Parser Stok (single-total + multi-gudang) ───────────────────────
+_GUDANG_HEADER_RE = re.compile(r"^\s*\d+\s*\.")          # "01.Jakarta", "25. PT BJM"
+_KODE_PREFIX_RE   = re.compile(r"^\d{6}\.")              # "000001." pada Kode Barang
+
+
+def _stok_to_int(v):
+    """Coerce nilai qty gudang jadi int. Return 0 kalau kosong/non-numerik."""
+    if v is None:
+        return 0
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "—", "-"):
+        return 0
+    s = s.replace(",", "").replace(".", "")
+    try:
+        return int(float(s))
+    except Exception:
+        return 0
+
+
+def parse_stok_file(file_bytes):
+    """
+    Parse file stok. Mendukung 2 format:
+
+      1. FORMAT LAMA (sederhana) — Kol A = Part Number, Kol D = Stok total.
+      2. FORMAT MULTI-GUDANG (export Accurate "Kuantitas Barang per Gudang") —
+         baris header memuat 'Kode Barang' + banyak kolom gudang ('01.Jakarta',
+         '02.Pekanbaru', …) + kolom 'Total'. Kode Barang berformat
+         'NNNNNN.PARTNUMBER' (prefix 6 digit dibuang).
+
+    Return tuple:
+      stok_cache   : {PN: "total"}                — kompatibel dgn kode lama
+      gudang_cache : {PN: {nama_gudang: qty_int}} — hanya gudang ber-qty != 0
+      gudang_names : [nama_gudang, …]             — urutan kolom gudang
+    """
+    try:
+        raw = pd.read_excel(io.BytesIO(file_bytes), header=None, dtype=str)
+    except Exception as e:
+        raise RuntimeError(f"Gagal baca Excel stok: {e}")
+
+    if raw.empty:
+        return {}, {}, []
+
+    # ── Cari baris header multi-gudang (col 0 == "Kode Barang") ──────
+    header_idx = None
+    for i in range(min(15, len(raw))):
+        c0 = str(raw.iloc[i, 0]).strip().lower()
+        if c0 in ("kode barang", "kode barang "):
+            header_idx = i
+            break
+
+    # ── FORMAT LAMA (tidak ada header multi-gudang) ──────────────────
+    if header_idx is None:
+        df = raw
+        if len(df) > 0 and any(
+            str(x).lower() in ["part number", "kode", "no part"] for x in df.iloc[0]
+        ):
+            df = df.iloc[1:]
+        ncol = df.shape[1]
+        pn_i  = 0
+        stk_i = 3 if ncol > 3 else (ncol - 1)
+        stok_cache = {}
+        for _, row in df.iterrows():
+            pn = str(row.iloc[pn_i]).strip().upper()
+            if not pn or pn in ("NAN", "NONE"):
+                continue
+            val = row.iloc[stk_i]
+            stok_cache[pn] = "—" if pd.isna(val) else str(val).strip()
+        return stok_cache, {}, []
+
+    # ── FORMAT MULTI-GUDANG ──────────────────────────────────────────
+    headers = [str(x).strip() if not pd.isna(x) else "" for x in raw.iloc[header_idx]]
+
+    kode_i  = 0
+    total_i = None
+    gudang_cols = []   # (col_index, nama_gudang)
+    for ci, h in enumerate(headers):
+        hl = h.lower()
+        if hl == "kode barang":
+            kode_i = ci
+        elif hl.startswith("total"):
+            total_i = ci
+        elif _GUDANG_HEADER_RE.match(h):
+            gudang_cols.append((ci, h))
+
+    gudang_names = [name for _, name in gudang_cols]
+
+    stok_cache   = {}
+    gudang_cache = {}
+    for ri in range(header_idx + 1, len(raw)):
+        row  = raw.iloc[ri]
+        kode = str(row.iloc[kode_i]).strip()
+        if not kode or kode.lower() in ("nan", "none"):
+            continue
+        pn = _KODE_PREFIX_RE.sub("", kode).strip().upper()
+        if not pn:
+            continue
+
+        # Total: pakai kolom Total kalau ada, kalau tidak jumlahkan semua gudang
+        if total_i is not None:
+            total_val = _stok_to_int(row.iloc[total_i])
+        else:
+            total_val = sum(_stok_to_int(row.iloc[ci]) for ci, _ in gudang_cols)
+
+        breakdown = {}
+        for ci, name in gudang_cols:
+            q = _stok_to_int(row.iloc[ci])
+            if q != 0:
+                breakdown[name] = q
+
+        stok_cache[pn] = str(total_val)
+        gudang_cache[pn] = breakdown
+
+    return stok_cache, gudang_cache, gudang_names
 
 
 # ── Search Functions ────────────────────────────────────────────────
@@ -2044,6 +2172,8 @@ class ExcelSearchApp:
         self.images_folder.mkdir(exist_ok=True)
         self.stok_file       = DATA_FOLDER / "stok" / "stok.xlsx"
         self.stok_cache      = None
+        self.stok_gudang_cache = None   # {PN: {nama_gudang: qty}} — format multi-gudang
+        self.gudang_names      = []     # urutan kolom gudang
         self.harga_file      = DATA_FOLDER / "harga" / "harga.xlsx"
         self.harga_cache     = None
         self.harga_lookup    = {}  # dict PN -> "Rp xxx" — dibangun sekali saat load
@@ -2237,7 +2367,9 @@ class ExcelSearchApp:
         if self.stok_cache is not None:
             return
         if "stok_data" in st.session_state:
-            self.stok_cache = st.session_state.stok_data
+            self.stok_cache        = st.session_state.stok_data
+            self.stok_gudang_cache = st.session_state.get("stok_gudang_data", {})
+            self.gudang_names      = st.session_state.get("stok_gudang_names", [])
             return
 
         # ── Coba download dari Supabase Storage ──────────────────────────
@@ -2260,24 +2392,30 @@ class ExcelSearchApp:
                     print(f"[stok] ❌ Gagal baca lokal: {e}")
 
         if not file_bytes:
-            self.stok_cache = {}
-            st.session_state.stok_data = self.stok_cache
+            self._set_stok_cache({}, {}, [])
             return
 
-        # ── Parse Excel ───────────────────────────────────────────────────
+        # ── Parse Excel (auto-deteksi format lama / multi-gudang) ─────────
         try:
-            df_stok = pd.read_excel(io.BytesIO(file_bytes), usecols=[0, 3], header=None, dtype=str)
-            if len(df_stok) > 0 and any(str(x).lower() in ["part number","kode","no part"] for x in df_stok.iloc[0]):
-                df_stok = df_stok.iloc[1:]
-            df_stok.columns = ["part_number","stok"]
-            df_stok["part_number"] = df_stok["part_number"].astype(str).str.strip().str.upper()
-            df_stok = df_stok.dropna(subset=["part_number"])
-            self.stok_cache = dict(zip(df_stok["part_number"], df_stok["stok"].fillna("—")))
-            st.session_state.stok_data = self.stok_cache
+            stok_cache, gudang_cache, gudang_names = parse_stok_file(file_bytes)
+            self._set_stok_cache(stok_cache, gudang_cache, gudang_names)
+            if gudang_names:
+                print(f"[stok] ✅ Format multi-gudang: {len(stok_cache)} PN, "
+                      f"{len(gudang_names)} gudang.")
+            else:
+                print(f"[stok] ✅ Format total: {len(stok_cache)} PN.")
         except Exception as e:
             st.error(f"Gagal membaca stok.xlsx → {e}")
-            self.stok_cache = {}
-            st.session_state.stok_data = self.stok_cache
+            self._set_stok_cache({}, {}, [])
+
+    def _set_stok_cache(self, stok_cache, gudang_cache, gudang_names):
+        """Simpan hasil parse stok ke instance + session_state."""
+        self.stok_cache        = stok_cache
+        self.stok_gudang_cache = gudang_cache
+        self.gudang_names      = gudang_names
+        st.session_state.stok_data         = stok_cache
+        st.session_state.stok_gudang_data  = gudang_cache
+        st.session_state.stok_gudang_names = gudang_names
 
 
     def _load_harga_data(self):
@@ -4327,9 +4465,11 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                     try: cf.unlink()
                     except Exception: pass
                 for k in ("excel_files","last_index_time","last_file_count","stok_data",
+                          "stok_gudang_data","stok_gudang_names",
                           "harga_data","harga_lookup"):
                     st.session_state.pop(k, None)
-                self.stok_cache = None; self.harga_cache = None; self.harga_lookup = {}
+                self.stok_cache = None; self.stok_gudang_cache = None; self.gudang_names = []
+                self.harga_cache = None; self.harga_lookup = {}
                 self._load_stok_data(); self._load_harga_data()
                 self.auto_load_excel_files()
                 st.rerun()
@@ -4360,7 +4500,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 st.markdown("""
 1. Letakkan file Excel di folder `data/`
 2. **Part Number** → kolom B | **Part Name** → kolom D
-3. **Stok:** data/stok/stok.xlsx (Kol A=PN, Kol D=Stok)
+3. **Stok:** data/stok/stok.xlsx — total (Kol A=PN, Kol D=Stok) **atau** export "Kuantitas Barang per Gudang" (multi-gudang, auto-deteksi)
 4. **Batch Download:** Upload Excel berisi PN di Kol A
                 """)
             st.caption(f"📁 Data: `{self.data_folder.name}/`")
@@ -4429,6 +4569,108 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
 
         self.display_search_results()
 
+    def _render_stok_cabang_section(self, df_res, gudang_scope):
+        """
+        Section di bawah hasil pencarian khusus akun cabang:
+        tabel stok di gudang user + kolom 'terdekat' bila stok gudang = 0.
+        Kolom Stok di tabel utama tetap total seluruh gudang.
+        """
+        gcache = self.stok_gudang_cache or {}
+        city = gudang_label(gudang_scope)
+
+        # PN unik (pertahankan urutan kemunculan) + Part Name
+        seen = {}
+        for _, r in df_res.iterrows():
+            pn = str(r.get("Part Number", "")).strip().upper()
+            if pn and pn not in seen:
+                seen[pn] = str(r.get("Part Name", "") or "")
+        if not seen:
+            return
+
+        rows = []
+        for pn, pname in seen.items():
+            bd = gcache.get(pn)
+            if bd is None:                       # PN tak ada di data stok
+                own_disp, near = "—", "—"
+            else:
+                own = bd.get(gudang_scope, 0)
+                if own:
+                    own_disp, near = str(own), "—"
+                else:
+                    own_disp, near = "0", "habis"
+                    for g in fallback_order(gudang_scope, self.gudang_names):
+                        q = bd.get(g, 0)
+                        if q:
+                            near = f"{gudang_label(g)} ({q})"
+                            break
+            rows.append({
+                "Part Number":          pn,
+                "Part Name":            pname,
+                f"Stok {city}":         own_disp,
+                "Stok Terdekat (jika 0)": near,
+            })
+
+        df_c = pd.DataFrame(rows)
+        st.markdown(
+            f'<div style="margin: 1rem 0 .4rem;font-size:14px;font-weight:700;'
+            f'letter-spacing:-.01em;color:var(--mp-ink);">'
+            f'📦 Stok Cabang Anda — {city}</div>'
+            f'<div style="font-size:12px;color:var(--mp-ink-50);margin-bottom:8px;">'
+            f'Kolom <b>Stok</b> di atas = total semua gudang. Tabel ini khusus '
+            f'gudang <b>{city}</b>; jika 0, ditampilkan cabang terdekat yang ada stok.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.dataframe(
+            df_c, hide_index=True, use_container_width=True,
+            column_config={
+                "Part Number":            st.column_config.TextColumn(width="medium"),
+                "Part Name":              st.column_config.TextColumn(width="large"),
+                f"Stok {city}":           st.column_config.TextColumn(width="small"),
+                "Stok Terdekat (jika 0)": st.column_config.TextColumn(width="medium"),
+            },
+        )
+
+    def _render_stok_gudang_breakdown(self, df_res):
+        """Expander rincian stok per gudang untuk PN di hasil pencarian."""
+        gcache = self.stok_gudang_cache or {}
+        # PN unik dari hasil yang memang punya data gudang
+        pns = [p for p in df_res["Part Number"].dropna().astype(str).str.upper().unique()
+               if p in gcache]
+        if not pns:
+            return
+
+        with st.expander("📦 Rincian stok per gudang", expanded=False):
+            sel_pn = st.selectbox(
+                "Pilih Part Number:", pns, key="stok_gudang_sel_pn",
+            )
+            breakdown = gcache.get(str(sel_pn).upper(), {}) or {}
+            total = self.stok_cache.get(str(sel_pn).upper(), "—")
+
+            if not breakdown:
+                st.info(f"Stok **{sel_pn}** = 0 di semua gudang. Total: {total}")
+                return
+
+            # Tampilkan sesuai urutan kolom gudang asli
+            order = {name: i for i, name in enumerate(self.gudang_names)}
+            rows = sorted(breakdown.items(), key=lambda kv: order.get(kv[0], 9999))
+            df_g = pd.DataFrame(
+                [{"Gudang": name, "Qty": qty} for name, qty in rows]
+            )
+            st.markdown(
+                f"<div style='font-size:13px;color:var(--mp-ink-50);margin-bottom:6px;'>"
+                f"<b>{sel_pn}</b> · tersebar di {len(rows)} gudang · "
+                f"Total <b>{total}</b></div>",
+                unsafe_allow_html=True,
+            )
+            st.dataframe(
+                df_g, hide_index=True, use_container_width=True,
+                column_config={
+                    "Gudang": st.column_config.TextColumn(width="large"),
+                    "Qty":    st.column_config.NumberColumn(width="small"),
+                },
+            )
+
     def display_search_results(self):
         results = st.session_state.get("search_results", [])
         if results:
@@ -4436,6 +4678,10 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             role = user["role"] if user else "user"
             allowed_cols = get_allowed_columns(user["username"], role)
             search_term = st.session_state.get("search_term", "")
+
+            # Cakupan gudang user: None = semua cabang (admin/mas),
+            # str = nama gudang cabang user.
+            gudang_scope = gudang_for_user(user["username"] if user else "", role)
 
             st.markdown(
                 '<div style="margin: 1.25rem 0 .5rem; padding-top: 1rem; '
@@ -4456,6 +4702,9 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 unsafe_allow_html=True,
             )
             df_res = pd.DataFrame(results)
+            # Catatan: kolom "Stok" SELALU total seluruh gudang (untuk semua
+            # akun). Stok per-cabang ditampilkan di section terpisah di bawah.
+
             # Daftar kolom yang ingin ditampilkan, filter Stok/Harga sesuai izin
             candidate_cols = ["File", "Part Number", "Part Name", "Quantity"]
             if "col_stok" in allowed_cols:
@@ -4477,6 +4726,16 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             }
             st.dataframe(df_res[cols], hide_index=True,
                          column_config={k: v for k, v in col_cfg.items() if k in cols})
+
+            # ── Stok per cabang (section terpisah di bawah hasil) ─────────
+            if "col_stok" in allowed_cols and (self.stok_gudang_cache or {}):
+                if gudang_scope is None:
+                    # admin / mas → rincian semua gudang
+                    self._render_stok_gudang_breakdown(df_res)
+                else:
+                    # akun cabang → stok gudangnya sendiri + fallback terdekat
+                    self._render_stok_cabang_section(df_res, gudang_scope)
+
             if st.session_state.get("search_type") == "Part Number":
                 _emit_image_scroll_anchor()
                 st.markdown(
