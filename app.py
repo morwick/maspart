@@ -4020,38 +4020,35 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             status_txt.empty()
             df_result = pd.DataFrame(results_all)
 
-            # ── Ambil Part Name dari SIMS untuk PN yang tidak ditemukan di database lokal ──
+            # ── Ambil Part Name dari SIMS untuk semua PN yang Part Name-nya kosong ──
             if SIMS_ENABLED:
                 try:
-                    from sims_fetcher import get_sims_part_info
+                    from sims_fetcher import get_sims_part_info as _gspi
                 except ImportError:
-                    get_sims_part_info = None
+                    _gspi = None
 
-                if get_sims_part_info:
-                    not_found_mask = df_result["Part Name"] == ""
-                    not_found_pns  = df_result.loc[not_found_mask, "Part Number"].tolist()
-                    if not_found_pns:
+                if _gspi:
+                    empty_name_mask = (
+                        df_result["Part Name"].isna() |
+                        (df_result["Part Name"].astype(str).str.strip() == "")
+                    )
+                    empty_name_pns = df_result.loc[empty_name_mask, "Part Number"].tolist()
+                    if empty_name_pns:
                         sims_prog   = st.progress(0)
                         sims_status = st.empty()
-                        for si, nf_pn in enumerate(not_found_pns):
-                            sims_status.text(f"🔎 Ambil Part Name dari SIMS {si+1}/{len(not_found_pns)}: {nf_pn}")
-                            sims_prog.progress((si + 1) / len(not_found_pns))
+                        for si, nf_pn in enumerate(empty_name_pns):
+                            sims_status.text(f"🔎 Ambil Part Name dari SIMS {si+1}/{len(empty_name_pns)}: {nf_pn}")
+                            sims_prog.progress((si + 1) / len(empty_name_pns))
                             try:
-                                sims_info, _ = get_sims_part_info(nf_pn)
+                                sims_info, _ = _gspi(nf_pn)
                                 if sims_info and sims_info.get("partName"):
                                     idx = df_result.index[df_result["Part Number"] == nf_pn].tolist()
-                                    for i in idx:
-                                        df_result.at[i, "Part Name"] = sims_info["partName"]
+                                    for row_i in idx:
+                                        df_result.at[row_i, "Part Name"] = sims_info["partName"]
                             except Exception:
                                 pass
                         sims_prog.empty()
                         sims_status.empty()
-
-            # Import get_sims_part_info jika belum tersedia di scope ini
-            try:
-                from sims_fetcher import get_sims_part_info
-            except ImportError:
-                pass
 
             # Simpan pilihan opsi output ke session_state
             batch_options = {
