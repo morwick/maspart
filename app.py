@@ -1926,22 +1926,13 @@ def search_part_name(term, excel_files, stok_cache, harga_lookup=None):
 
 # ── Build Excel Functions ───────────────────────────────────────────
 
-def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_part_numbers: list = None, options: dict = None) -> bytes:
+def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_part_numbers: list = None) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.drawing.image import Image as XLImage
     from PIL import Image as PILImage
     import tempfile
-
-    # Default semua aktif jika options tidak diberikan
-    if options is None:
-        options = {}
-    inc_partname  = options.get("partname",  True)
-    inc_kecocokan = options.get("kecocokan", True)
-    inc_stok      = options.get("stok",      True)
-    inc_qty       = options.get("qty",       True)
-    inc_images    = options.get("images",    True)
 
     wb = Workbook()
     ws = wb.active
@@ -1954,20 +1945,8 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
     thin        = Side(style="thin", color="BDBDBD")
     border      = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # Bangun header dinamis sesuai pilihan
-    headers    = ["Part Number"]
-    col_widths = [20]
-    if inc_partname:
-        headers.append("Part Name"); col_widths.append(30)
-    if inc_kecocokan:
-        headers.append("Kecocokan"); col_widths.append(45)
-    if inc_qty:
-        headers.append("Qty"); col_widths.append(12)
-    if inc_stok:
-        headers.append("Stok"); col_widths.append(12)
-    if inc_images:
-        headers.extend(["Gambar 1", "Gambar 2"]); col_widths.extend([38, 38])
-
+    headers    = ["Part Number", "Part Name", "Kecocokan", "Gambar 1", "Gambar 2"]
+    col_widths = [20, 30, 45, 38, 38]
     for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=ci, value=h)
         cell.font = header_font; cell.fill = header_fill
@@ -1989,8 +1968,6 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
                 "Part Name": r.get("Part Name", ""),
                 "kecocokan": r.get("Hasil", ""),
                 "found":     r.get("Status", "") == "✅ Ditemukan",
-                "Qty":       r.get("Qty", ""),
-                "Stok":      r.get("Stok", ""),
             }
 
     # Gunakan urutan asli dari all_part_numbers — TANPA deduplikasi
@@ -2025,11 +2002,6 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
     row_idx   = 2
     total_pn  = len(grouped_list)
 
-    # Hitung indeks kolom gambar secara dinamis
-    img_col_start = 1 + 1 + int(inc_partname) + int(inc_kecocokan) + int(inc_qty) + int(inc_stok)
-    img_col_d_letter = get_column_letter(img_col_start)
-    img_col_e_letter = get_column_letter(img_col_start + 1)
-
     for i, (pn, info) in enumerate(grouped_list):
         if progress_callback:
             progress_callback(i, total_pn, pn)
@@ -2038,22 +2010,11 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
         is_found   = info["found"]
         part_name  = info["Part Name"]
         fill       = (fill_even if i % 2 == 0 else fill_odd) if is_found else fill_nf
-        row_height = 22 if not inc_images else 80
+        row_height = 80
         img_d      = None
         img_e      = None
 
-        # ── Fallback Part Name dari SIMS (selalu berjalan jika SIMS aktif) ──
-        if SIMS_ENABLED and not part_name:
-            try:
-                from sims_fetcher import get_sims_part_info
-                sims_info, _ = get_sims_part_info(pn)
-                if sims_info and sims_info.get("partName"):
-                    part_name = sims_info["partName"]
-            except Exception:
-                pass
-
-        # ── Fetch gambar dari SIMS (hanya jika opsi gambar aktif) ──
-        if inc_images and SIMS_ENABLED:
+        if SIMS_ENABLED:
             try:
                 urls, _ = _sims_fetch(pn)
                 if urls:
@@ -2072,47 +2033,38 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
                                 tmp_files.append(tmp_path)
                                 row_height = max(int(h * 0.75) + 10, row_height)
                                 break
+
+                # Jika PN tidak ditemukan di Excel tapi ada di SIMS,
+                # ambil Part Name dari SIMS
+                if not is_found and not part_name:
+                    try:
+                        from sims_fetcher import get_sims_part_info
+                        sims_info, _ = get_sims_part_info(pn)
+                        if sims_info.get("partName"):
+                            part_name = sims_info["partName"]
+                    except Exception:
+                        pass
+
             except Exception as e:
                 print(f"[catalog] Gagal ambil gambar {pn}: {e}")
 
         ws.row_dimensions[row_idx].height = row_height
 
-        # Isi kolom secara dinamis sesuai pilihan
-        ci = 1
-        for val, aln in [(pn, center)]:
+        for ci, (val, aln) in enumerate(
+            [(pn, center), (part_name, left), (kecocokan, left)], start=1
+        ):
             cell = ws.cell(row=row_idx, column=ci, value=val)
             cell.fill = fill; cell.border = border
             cell.alignment = aln; cell.font = Font(name="Arial", size=10)
-            ci += 1
-        if inc_partname:
-            cell = ws.cell(row=row_idx, column=ci, value=part_name)
-            cell.fill = fill; cell.border = border
-            cell.alignment = left; cell.font = Font(name="Arial", size=10)
-            ci += 1
-        if inc_kecocokan:
-            cell = ws.cell(row=row_idx, column=ci, value=kecocokan)
-            cell.fill = fill; cell.border = border
-            cell.alignment = left; cell.font = Font(name="Arial", size=10)
-            ci += 1
-        if inc_qty:
-            cell = ws.cell(row=row_idx, column=ci, value=info.get("Qty", ""))
-            cell.fill = fill; cell.border = border
-            cell.alignment = center; cell.font = Font(name="Arial", size=10)
-            ci += 1
-        if inc_stok:
-            cell = ws.cell(row=row_idx, column=ci, value=info.get("Stok", ""))
-            cell.fill = fill; cell.border = border
-            cell.alignment = center; cell.font = Font(name="Arial", size=10)
-            ci += 1
-        if inc_images:
-            for _ in range(2):
-                c = ws.cell(row=row_idx, column=ci, value="")
-                c.fill = fill; c.border = border; c.alignment = center
-                ci += 1
-            if img_d:
-                ws.add_image(img_d, f"{img_col_d_letter}{row_idx}")
-            if img_e:
-                ws.add_image(img_e, f"{img_col_e_letter}{row_idx}")
+
+        for ci in (4, 5):
+            c = ws.cell(row=row_idx, column=ci, value="")
+            c.fill = fill; c.border = border; c.alignment = center
+
+        if img_d:
+            ws.add_image(img_d, f"D{row_idx}")
+        if img_e:
+            ws.add_image(img_e, f"E{row_idx}")
 
         row_idx += 1
 
@@ -3966,21 +3918,6 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
         with st.expander("👁️ Preview Part Number"):
             st.dataframe(pd.DataFrame({"Part Number": part_numbers}), hide_index=True, height=200)
 
-        # ── Pilihan konten output ─────────────────────────────────────
-        with st.expander("⚙️ Pilih Konten Output", expanded=True):
-            st.caption("Centang kolom yang ingin dimasukkan ke file hasil download:")
-            opt_col1, opt_col2, opt_col3 = st.columns(3)
-            with opt_col1:
-                batch_opt_partname   = st.checkbox("📝 Part Name",    value=True, key="batch_opt_partname")
-                batch_opt_kecocokan  = st.checkbox("📁 Kecocokan File", value=True, key="batch_opt_kecocokan")
-            with opt_col2:
-                batch_opt_stok       = st.checkbox("📦 Stok",         value=True, key="batch_opt_stok")
-                batch_opt_qty        = st.checkbox("🔢 Qty",           value=True, key="batch_opt_qty")
-            with opt_col3:
-                batch_opt_images     = st.checkbox("🖼️ Gambar (dari SIMS)", value=True, key="batch_opt_images")
-            if not batch_opt_images:
-                st.info("💡 Tanpa gambar, proses akan jauh lebih cepat.")
-
         if st.button("🔍 Proses Batch Search", type="primary", use_container_width=True, key="batch_process_btn"):
             if not st.session_state.excel_files:
                 st.error("Tidak ada file Excel yang ter-index di folder data/.")
@@ -4020,45 +3957,45 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             status_txt.empty()
             df_result = pd.DataFrame(results_all)
 
-            # ── Ambil Part Name dari SIMS untuk semua PN yang Part Name-nya kosong ──
+            # ── Ambil Part Name dari SIMS untuk semua PN yang Part Name-nya kosong / N/A ──
             if SIMS_ENABLED:
                 try:
-                    from sims_fetcher import get_sims_part_info as _gspi
+                    from sims_fetcher import get_sims_part_info
                 except ImportError:
-                    _gspi = None
+                    get_sims_part_info = None
 
-                if _gspi:
-                    empty_name_mask = (
-                        df_result["Part Name"].isna() |
-                        (df_result["Part Name"].astype(str).str.strip() == "")
-                    )
-                    empty_name_pns = df_result.loc[empty_name_mask, "Part Number"].tolist()
-                    if empty_name_pns:
+                if get_sims_part_info:
+                    # Tangkap: kosong (""), "N/A", whitespace, atau NaN — baik ditemukan maupun tidak
+                    def _part_name_missing(val):
+                        if val is None:
+                            return True
+                        s = str(val).strip()
+                        return s == "" or s.upper() == "N/A"
+
+                    not_found_mask = df_result["Part Name"].apply(_part_name_missing)
+                    not_found_pns  = df_result.loc[not_found_mask, "Part Number"].tolist()
+                    if not_found_pns:
                         sims_prog   = st.progress(0)
                         sims_status = st.empty()
-                        for si, nf_pn in enumerate(empty_name_pns):
-                            sims_status.text(f"🔎 Ambil Part Name dari SIMS {si+1}/{len(empty_name_pns)}: {nf_pn}")
-                            sims_prog.progress((si + 1) / len(empty_name_pns))
+                        for si, nf_pn in enumerate(not_found_pns):
+                            sims_status.text(f"🔎 Ambil Part Name dari SIMS {si+1}/{len(not_found_pns)}: {nf_pn}")
+                            sims_prog.progress((si + 1) / len(not_found_pns))
                             try:
-                                sims_info, _ = _gspi(nf_pn)
+                                sims_info, _ = get_sims_part_info(nf_pn)
                                 if sims_info and sims_info.get("partName"):
                                     idx = df_result.index[df_result["Part Number"] == nf_pn].tolist()
-                                    for row_i in idx:
-                                        df_result.at[row_i, "Part Name"] = sims_info["partName"]
+                                    for i in idx:
+                                        df_result.at[i, "Part Name"] = sims_info["partName"]
                             except Exception:
                                 pass
                         sims_prog.empty()
                         sims_status.empty()
 
-            # Simpan pilihan opsi output ke session_state
-            batch_options = {
-                "partname":  st.session_state.get("batch_opt_partname",  True),
-                "kecocokan": st.session_state.get("batch_opt_kecocokan", True),
-                "stok":      st.session_state.get("batch_opt_stok",      True),
-                "qty":       st.session_state.get("batch_opt_qty",       True),
-                "images":    st.session_state.get("batch_opt_images",    True),
-            }
-            st.session_state["batch_options"] = batch_options
+            # Import get_sims_part_info jika belum tersedia di scope ini
+            try:
+                from sims_fetcher import get_sims_part_info
+            except ImportError:
+                pass
 
             prog_cat   = st.progress(0)
             status_cat = st.empty()
@@ -4068,12 +4005,7 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
                 status_cat.text(f"🖼️ Fetch gambar {i+1}/{tot}: {pn}")
 
             try:
-                cat_bytes = build_catalog_excel(
-                    df_result,
-                    progress_callback=_prog,
-                    all_part_numbers=part_numbers,
-                    options=batch_options,
-                )
+                cat_bytes = build_catalog_excel(df_result, progress_callback=_prog, all_part_numbers=part_numbers)
                 st.session_state["batch_catalog_bytes"]     = cat_bytes
                 st.session_state["batch_catalog_df"]        = df_result
                 st.session_state["batch_catalog_timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
