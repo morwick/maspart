@@ -1926,7 +1926,7 @@ def search_part_name(term, excel_files, stok_cache, harga_lookup=None):
 
 # ── Build Excel Functions ───────────────────────────────────────────
 
-def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_part_numbers: list = None) -> bytes:
+def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_part_numbers: list = None, include_foto: bool = True) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -1945,8 +1945,11 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
     thin        = Side(style="thin", color="BDBDBD")
     border      = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    headers    = ["Part Number", "Part Name", "Kecocokan", "Gambar 1", "Gambar 2"]
-    col_widths = [20, 30, 45, 38, 38]
+    headers    = ["Part Number", "Part Name", "Kecocokan"]
+    col_widths = [20, 30, 45]
+    if include_foto:
+        headers    += ["Gambar 1", "Gambar 2"]
+        col_widths += [38, 38]
     for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=ci, value=h)
         cell.font = header_font; cell.fill = header_fill
@@ -2016,23 +2019,24 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
 
         if SIMS_ENABLED:
             try:
-                urls, _ = _sims_fetch(pn)
-                if urls:
-                    b1, _ = ExcelSearchApp.fetch_image_bytes(urls[0])
-                    if b1:
-                        xl, w, h, tmp_path = _make_xl_image(b1)
-                        img_d = xl
-                        tmp_files.append(tmp_path)
-                        row_height = max(int(h * 0.75) + 10, row_height)
-                        hash1 = hashlib.md5(b1).hexdigest()
-                        for url2 in urls[1:]:
-                            b2, _ = ExcelSearchApp.fetch_image_bytes(url2)
-                            if b2 and hashlib.md5(b2).hexdigest() != hash1:
-                                xl, w, h, tmp_path = _make_xl_image(b2)
-                                img_e = xl
-                                tmp_files.append(tmp_path)
-                                row_height = max(int(h * 0.75) + 10, row_height)
-                                break
+                if include_foto:
+                    urls, _ = _sims_fetch(pn)
+                    if urls:
+                        b1, _ = ExcelSearchApp.fetch_image_bytes(urls[0])
+                        if b1:
+                            xl, w, h, tmp_path = _make_xl_image(b1)
+                            img_d = xl
+                            tmp_files.append(tmp_path)
+                            row_height = max(int(h * 0.75) + 10, row_height)
+                            hash1 = hashlib.md5(b1).hexdigest()
+                            for url2 in urls[1:]:
+                                b2, _ = ExcelSearchApp.fetch_image_bytes(url2)
+                                if b2 and hashlib.md5(b2).hexdigest() != hash1:
+                                    xl, w, h, tmp_path = _make_xl_image(b2)
+                                    img_e = xl
+                                    tmp_files.append(tmp_path)
+                                    row_height = max(int(h * 0.75) + 10, row_height)
+                                    break
 
                 # Jika PN tidak ditemukan di Excel tapi ada di SIMS,
                 # ambil Part Name dari SIMS
@@ -2058,8 +2062,9 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
             cell.alignment = aln; cell.font = Font(name="Arial", size=10)
 
         for ci in (4, 5):
-            c = ws.cell(row=row_idx, column=ci, value="")
-            c.fill = fill; c.border = border; c.alignment = center
+            if include_foto:
+                c = ws.cell(row=row_idx, column=ci, value="")
+                c.fill = fill; c.border = border; c.alignment = center
 
         if img_d:
             ws.add_image(img_d, f"D{row_idx}")
@@ -3899,6 +3904,16 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             st.warning("Tidak ada Part Number yang valid dalam file.")
             return
 
+        # ── Opsi Foto ─────────────────────────────────────────────────
+        include_foto = st.checkbox(
+            "🖼️ Sertakan Foto dalam hasil download",
+            value=True,
+            key="batch_include_foto",
+            help="Nonaktifkan jika ingin hasil lebih cepat tanpa gambar",
+        )
+        if not include_foto:
+            st.info("ℹ️ Mode tanpa foto — proses akan jauh lebih cepat.")
+
         # Hapus duplikat, pertahankan urutan kemunculan pertama
         seen = set()
         part_numbers = []
@@ -3997,23 +4012,25 @@ Sistem akan mencari semua PN secara otomatis dan menghasilkan file katalog.
             except ImportError:
                 pass
 
-            prog_cat   = st.progress(0)
-            status_cat = st.empty()
+            prog_cat   = st.progress(0) if include_foto else None
+            status_cat = st.empty()    if include_foto else None
 
             def _prog(i, tot, pn):
-                prog_cat.progress((i + 1) / max(tot, 1))
-                status_cat.text(f"🖼️ Fetch gambar {i+1}/{tot}: {pn}")
+                if prog_cat:
+                    prog_cat.progress((i + 1) / max(tot, 1))
+                if status_cat:
+                    status_cat.text(f"🖼️ Fetch gambar {i+1}/{tot}: {pn}")
 
             try:
-                cat_bytes = build_catalog_excel(df_result, progress_callback=_prog, all_part_numbers=part_numbers)
+                cat_bytes = build_catalog_excel(df_result, progress_callback=_prog, all_part_numbers=part_numbers, include_foto=include_foto)
                 st.session_state["batch_catalog_bytes"]     = cat_bytes
                 st.session_state["batch_catalog_df"]        = df_result
                 st.session_state["batch_catalog_timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
             except Exception as e:
                 st.error(f"❌ Gagal membuat katalog: {e}")
             finally:
-                prog_cat.empty()
-                status_cat.empty()
+                if prog_cat:   prog_cat.empty()
+                if status_cat: status_cat.empty()
 
             st.rerun()
 
