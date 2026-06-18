@@ -2042,6 +2042,17 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
         img_d      = None
         img_e      = None
 
+        # ── Fallback Part Name dari SIMS (selalu berjalan jika SIMS aktif) ──
+        if SIMS_ENABLED and not part_name:
+            try:
+                from sims_fetcher import get_sims_part_info
+                sims_info, _ = get_sims_part_info(pn)
+                if sims_info and sims_info.get("partName"):
+                    part_name = sims_info["partName"]
+            except Exception:
+                pass
+
+        # ── Fetch gambar dari SIMS (hanya jika opsi gambar aktif) ──
         if inc_images and SIMS_ENABLED:
             try:
                 urls, _ = _sims_fetch(pn)
@@ -2061,18 +2072,6 @@ def build_catalog_excel(df_result: pd.DataFrame, progress_callback=None, all_par
                                 tmp_files.append(tmp_path)
                                 row_height = max(int(h * 0.75) + 10, row_height)
                                 break
-
-                # Jika PN tidak ditemukan di Excel tapi ada di SIMS,
-                # ambil Part Name dari SIMS
-                if not is_found and not part_name:
-                    try:
-                        from sims_fetcher import get_sims_part_info
-                        sims_info, _ = get_sims_part_info(pn)
-                        if sims_info.get("partName"):
-                            part_name = sims_info["partName"]
-                    except Exception:
-                        pass
-
             except Exception as e:
                 print(f"[catalog] Gagal ambil gambar {pn}: {e}")
 
