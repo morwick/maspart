@@ -1588,6 +1588,79 @@ class LoginManager:
         return st.session_state.get("current_user")
 
 
+NEW_SITE_URL    = "https://maspart.tech"
+NEW_SITE_LABEL  = "maspart.tech"
+
+
+def render_moved_notice():
+    """Halaman blokir penuh: form login disembunyikan, hanya pemberitahuan
+    bahwa website telah pindah ke maspart.tech."""
+    st.markdown(
+        """
+<style>
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(180deg, #FFFFFF 0%, #F1FAF2 100%) !important;
+    min-height: 100vh !important;
+}
+.stApp { background: linear-gradient(180deg, #FFFFFF 0%, #F1FAF2 100%) !important; }
+header[data-testid="stHeader"] { display: none !important; }
+div[data-testid="stToolbar"] { display: none !important; }
+[data-testid="stSidebar"] { display: none !important; }
+section.main, section[data-testid="stMain"], [data-testid="stMain"] {
+    background: transparent !important;
+    min-height: 100vh !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    align-items: center !important;
+}
+.block-container {
+    padding: 2rem 1.5rem !important;
+    margin: 0 auto !important;
+    max-width: 560px !important;
+    width: 100% !important;
+    flex: 0 0 auto !important;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # HTML kartu — baris TIDAK boleh ber-indentasi agar Markdown tidak
+    # menganggapnya sebagai code block (itu yang bikin tampil sebagai teks).
+    st.markdown(
+        '<div style="background:white;border:1px solid #E3E8E4;border-radius:16px;'
+        'padding:40px 36px;text-align:center;'
+        'box-shadow:0 10px 40px rgba(15,26,18,.08), 0 2px 6px rgba(15,26,18,.04);">'
+        '<div style="display:inline-flex;align-items:center;gap:12px;margin-bottom:28px;">'
+        '<div style="width:52px;height:52px;border-radius:12px;background:#028912;'
+        'color:white;display:flex;align-items:center;justify-content:center;'
+        'font-weight:800;font-size:26px;letter-spacing:-.02em;'
+        'box-shadow:0 6px 18px rgba(2,137,18,.25);">M</div>'
+        '<div style="text-align:left;">'
+        '<div style="font-size:24px;font-weight:800;letter-spacing:-.02em;line-height:1;color:#0F1A12;">MasPart</div>'
+        '<div style="font-size:11.5px;color:#5A6B5E;margin-top:4px;'
+        'letter-spacing:.04em;text-transform:uppercase;font-weight:600;">Part Number Finder</div>'
+        '</div></div>'
+        '<h1 style="font-size:26px;font-weight:700;line-height:1.25;letter-spacing:-.02em;'
+        'margin:0 0 12px;color:#0F1A12;">Website telah pindah 🚚</h1>'
+        '<p style="font-size:15px;color:#3D4A40;line-height:1.6;margin:0 0 8px;">'
+        'Mulai sekarang MasPart hanya dapat diakses melalui alamat baru:</p>'
+        f'<a href="{NEW_SITE_URL}" style="display:inline-block;font-size:22px;font-weight:800;'
+        f'color:#028912;text-decoration:none;margin:8px 0 24px;letter-spacing:-.01em;">👉 {NEW_SITE_LABEL}</a>'
+        '<div>'
+        f'<a href="{NEW_SITE_URL}" style="display:inline-block;background:#028912;color:white;'
+        'font-size:15px;font-weight:700;text-decoration:none;padding:14px 32px;border-radius:10px;'
+        f'box-shadow:0 6px 18px rgba(2,137,18,.25);">Buka {NEW_SITE_LABEL} →</a>'
+        '</div>'
+        '<p style="font-size:12px;color:#5A6B5E;margin:24px 0 0;line-height:1.5;">'
+        f'Silakan perbarui bookmark Anda ke <b>{NEW_SITE_LABEL}</b>.<br>'
+        'Halaman login lama sudah tidak digunakan lagi.</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_login_page(login_mgr: LoginManager):
     error_msg = st.session_state.get("login_error")
     inject_keep_alive()
@@ -5237,7 +5310,7 @@ def main():
     LoginManager.init_session()
     login_mgr = LoginManager()
     if not LoginManager.is_authenticated():
-        render_login_page(login_mgr)
+        render_moved_notice()
     else:
         ExcelSearchApp().run()
 
